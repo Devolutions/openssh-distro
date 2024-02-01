@@ -57,8 +57,25 @@ git clone -b $UpstreamGitTag --depth 1 $UpstreamGitRepo openssh-upstream
 Remove-Item -Path openssh-downstream -Recurse -Force -ErrorAction SilentlyContinue
 git clone -b $DownstreamGitTag --depth 1 $DownstreamGitRepo openssh-downstream
 
+# fix resource.h encoding to avoid being seen as a binary file by 'diff'
+dos2unix ./openssh-downstream/contrib/win32/openssh/resource.h
+
 # generate single patch file from upstream and downstream directories:
 diff -ruN --exclude=.git openssh-upstream/ openssh-downstream/ > Win32-OpenSSH.patch
+
+# generate a list of binary files which differ between upstream and downstream directories:
+diff -ruN --exclude=.git openssh-upstream/ openssh-downstream/ | grep "^Binary files" |
+    awk -F ' and ' '{split($1, a, " "); sub("^[^/]*/", "", a[3]); print a[3]}' > Win32-OpenSSH-bin.txt
+
+# copy binary (non-textual) files from downstream to upstream directory
+foreach($BinaryFile in (Get-Content ./Win32-OpenSSH-bin.txt)) {
+    Write-Host "Copying binary file $BinaryFile"
+    $DestinationFile = Join-Path (Get-Location) "openssh-upstream" $BinaryFile
+    $DestinationPath = [System.IO.Path]::GetDirectoryName($DestinationFile)
+    New-Item -Path $DestinationPath -ItemType Directory -ErrorAction SilentlyContinue | Out-Null
+    Copy-Item "./openssh-downstream/$BinaryFile" $DestinationFile -Force
+}
+Remove-Item ./Win32-OpenSSH-bin.txt | Out-Null
 
 # apply downstream Win32-OpenSSH patches on top of upstream OpenSSH repository
 cd openssh-upstream
@@ -66,6 +83,15 @@ $Win32PatchBranch = "Win32-v${Version}"
 git branch $Win32PatchBranch && git checkout $Win32PatchBranch
 Get-Content ../Win32-OpenSSH.patch -Raw | patch -s -p1
 Remove-Item ../Win32-OpenSSH.patch | Out-Null
+
+# Sanitize .gitignore file to avoid ignoring directories matching executable names
+$LinesToRemove = @("scp", "sftp", "sftp-server", "ssh",
+    "ssh-add", "ssh-agent", "ssh-keygen", "ssh-keyscan",
+    "ssh-keysign", "ssh-pkcs11-helper", "ssh-sk-helper", "sshd")
+$FilteredContent = Get-Content -Path ".gitignore" | Where-Object { $_ -NotIn $linesToRemove }
+$FilteredContent | Set-Content -Path ".gitignore"
+
+# Create new commits from the applied changes
 git add $(git ls-files -o --exclude-standard)
 git commit -m "Win32-OpenSSH v${Version} added files"
 git add -A

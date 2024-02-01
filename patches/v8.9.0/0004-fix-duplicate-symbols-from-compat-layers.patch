@@ -1,0 +1,65 @@
+From add8a8acc3068469cc48a449d85894daad9a1ca1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <marcandre.moreau@gmail.com>
+Date: Fri, 8 Apr 2022 17:03:18 -0400
+Subject: [PATCH 4/8] fix duplicate symbols from compat layers
+
+---
+ contrib/win32/openssh/config.h.vs | 6 +++---
+ contrib/win32/win32compat/misc.c  | 6 +++---
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/contrib/win32/openssh/config.h.vs b/contrib/win32/openssh/config.h.vs
+index 960d87096..b9de0b00a 100644
+--- a/contrib/win32/openssh/config.h.vs
++++ b/contrib/win32/openssh/config.h.vs
+@@ -206,13 +206,13 @@
+ /* #undef HAVE_ADDR_V6_IN_UTMPX */
+ 
+ /* Define to 1 if you have the `arc4random' function. */
+-/* #undef HAVE_ARC4RANDOM */
++#define HAVE_ARC4RANDOM 1
+ 
+ /* Define to 1 if you have the `arc4random_buf' function. */
+-/* #undef HAVE_ARC4RANDOM_BUF */
++#define HAVE_ARC4RANDOM_BUF 1
+ 
+ /* Define to 1 if you have the `arc4random_uniform' function. */
+-/* #undef HAVE_ARC4RANDOM_UNIFORM */
++#define HAVE_ARC4RANDOM_UNIFORM 1
+ 
+ /* Define to 1 if you have the `asprintf' function. */
+ /* #undef HAVE_ASPRINTF */
+diff --git a/contrib/win32/win32compat/misc.c b/contrib/win32/win32compat/misc.c
+index ec6baff0f..ccdcd3498 100644
+--- a/contrib/win32/win32compat/misc.c
++++ b/contrib/win32/win32compat/misc.c
+@@ -190,7 +190,7 @@ nanosleep(const struct timespec *req, struct timespec *rem)
+  * Copyright (c) 2009, 2010 NoMachine
+  * All rights reserved
+  */
+-int
++static int
+ gettimeofday(struct timeval *tv, void *tz)
+ {
+ 	union {
+@@ -212,7 +212,7 @@ gettimeofday(struct timeval *tv, void *tz)
+ 	return 0;
+ }
+ 
+-void
++static void
+ explicit_bzero(void *b, size_t len)
+ {
+ 	SecureZeroMemory(b, len);
+@@ -1480,7 +1480,7 @@ localtime_r(const time_t *timep, struct tm *result)
+ 	return localtime_s(result, timep) == 0 ? result : NULL;
+ }
+ 
+-void
++static void
+ freezero(void *ptr, size_t sz)
+ {
+ 	if (ptr == NULL)
+-- 
+2.25.1
+
