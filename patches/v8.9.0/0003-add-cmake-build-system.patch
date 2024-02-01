@@ -1,0 +1,3904 @@
+From 702475bfb03792390a73d661155f6adb031191ee Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
+Date: Thu, 1 Feb 2024 13:44:42 -0500
+Subject: [PATCH 3/8] add cmake build system
+
+---
+ CMakeLists.txt    | 1770 +++++++++++++++++++++++++++++++++++++
+ cmake-config.h.in | 2107 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 3877 insertions(+)
+ create mode 100644 CMakeLists.txt
+ create mode 100644 cmake-config.h.in
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 000000000..7483b8142
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,1770 @@
++
++cmake_minimum_required(VERSION 3.18)
++
++if(WIN32)
++    set(WINSDK_VERSION "10.0.17763.0")
++    set(CMAKE_SYSTEM_VERSION ${WINSDK_VERSION})
++    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
++
++    get_filename_component(KITS_ROOT_10
++	    "[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Microsoft SDKs\\Windows\\v10.0;InstallationFolder]" ABSOLUTE CACHE)
++    file(TO_CMAKE_PATH "${KITS_ROOT_10}" WindowsSdkDir)
++    string(APPEND WindowsSdkDir "/")
++    set(VC_INCLUDE_PATH "${WindowsSdkDir}include/${WINSDK_VERSION}/ucrt")
++endif()
++
++project(OpenSSH C)
++
++include(CheckIncludeFiles)
++include(CheckCCompilerFlag)
++include(CMakeDependentOption)
++
++cmake_policy(SET CMP0091 NEW)
++
++set(CMAKE_SHARED_LIBRARY_PREFIX "")
++set(CMAKE_STATIC_LIBRARY_PREFIX "")
++
++set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++
++set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
++set(CMAKE_INCLUDE_CURRENT_DIR ON)
++
++set(OPENSSH_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
++set(OPENSSH_BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}")
++
++set(OPENSSH_WIN32_SRC_DIR "${OPENSSH_SRC_DIR}/contrib/win32")
++set(OPENSSH_WIN32_BIN_DIR "${OPENSSH_BIN_DIR}/contrib/win32")
++
++# detect target processor architecture
++
++if(DEFINED CMAKE_OSX_ARCHITECTURES AND CMAKE_OSX_ARCHITECTURES)
++    list(LENGTH CMAKE_OSX_ARCHITECTURES CMAKE_OSX_ARCHITECTURES_COUNT)
++    if(NOT (CMAKE_OSX_ARCHITECTURES_COUNT EQUAL 1))
++        message(WARNING "CMAKE_OSX_ARCHITECTURES can only be used to specify one architecture at a time")
++    endif()
++    list(GET CMAKE_OSX_ARCHITECTURES 0 CMAKE_SYSTEM_PROCESSOR)
++endif()
++
++if(DEFINED CMAKE_GENERATOR_PLATFORM AND CMAKE_GENERATOR_PLATFORM)
++    set(CMAKE_SYSTEM_PROCESSOR "${CMAKE_GENERATOR_PLATFORM}" CACHE STRING "" FORCE)
++endif()
++
++message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
++
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
++    set(TARGET_ARCH "arm64")
++    set(FIDO2_ARCH "ARM64")
++elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm|^ARM")
++    set(TARGET_ARCH "arm")
++    set(FIDO2_ARCH "ARM")
++elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|x64|amd64|AMD64")
++    set(TARGET_ARCH "x64")
++    set(FIDO2_ARCH "Win64")
++elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86|Win32|i386|i486|i586|i686")
++    set(TARGET_ARCH "x86")
++    set(FIDO2_ARCH "Win32")
++else()
++    message(FATAL_ERROR "Could not detect processor architecture for \"${CMAKE_SYSTEM_PROCESSOR}\"")
++endif()
++
++# compiler-specific flags
++
++if(WIN32)
++    set(C_FLAGS "")
++    set(C_FLAGS "${C_FLAGS} -DWIN32")
++    set(C_FLAGS "${C_FLAGS} -D_LIB")
++    set(C_FLAGS "${C_FLAGS} -D_WIN32_WINNT=0x601")
++    set(C_FLAGS "${C_FLAGS} -D_CRT_SECURE_NO_WARNINGS")
++    set(C_FLAGS "${C_FLAGS} -D_CRT_NONSTDC_NO_WARNINGS")
++    set(C_FLAGS "${C_FLAGS} -D_WINSOCK_DEPRECATED_NO_WARNINGS")
++    #set(C_FLAGS "${C_FLAGS} -D_UNICODE") # requires patching to enable properly
++    set(CMAKE_C_FLAGS "${C_FLAGS} ${CMAKE_C_FLAGS}")
++
++    # required for all executables except ssh-shellhost
++    set(C_FLAGS_ENTRY_POINT "/ENTRY:wmainCRTStartup")
++else()
++    if(APPLE)
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DARWIN_C_SOURCE")
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations")
++        #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unguarded-availability-new")
++    else()
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_XOPEN_SOURCE=600 -D_BSD_SOURCE -D_DEFAULT_SOURCE")
++    endif()
++
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror-implicit-function-declaration")
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-incompatible-pointer-types")
++
++    check_c_compiler_flag(-Wno-format-truncation CFLAG_W_NO_FORMAT_TRUNCATION)
++    if(CFLAG_W_NO_FORMAT_TRUNCATION)
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-format-truncation")
++    endif()
++
++    check_c_compiler_flag(-Wno-pointer-sign CFLAG_W_NO_POINTER_SIGN)
++    if(CFLAG_W_NO_POINTER_SIGN)
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-pointer-sign")
++    endif()
++endif()
++
++# detect prebuilt dependencies
++
++set(USE_OPENSSL TRUE)
++
++if(WIN32)
++    set(PREBUILT_DEPS_AVAILABLE ON)
++else()
++    set(PREBUILT_DEPS_AVAILABLE OFF)
++endif()
++
++option(USE_PREBUILT_DEPS "Use prebuilt Microsoft dependencies" ${PREBUILT_DEPS_AVAILABLE})
++
++set(OPENSSH_DEPS_DIR "${OPENSSH_BIN_DIR}/contrib/win32/openssh")
++
++if(USE_PREBUILT_DEPS)
++    message(STATUS "Using prebuilt Microsoft dependencies")
++
++    set(ZLIB_VERSION "1.2.11")
++    set(ZLIB_ZIP_URL "https://github.com/PowerShell/zlib/releases/download/V${ZLIB_VERSION}/ZLib.zip")
++
++    file(DOWNLOAD "${ZLIB_ZIP_URL}" "${OPENSSH_DEPS_DIR}/ZLib.zip"
++        EXPECTED_HASH "SHA256=67AC5CCDBFDC64C275B7AD3D70FCF702F5F8086B10F2C7A91D8F71709F8A7339")
++    file(ARCHIVE_EXTRACT INPUT "${OPENSSH_DEPS_DIR}/ZLib.zip" DESTINATION "${OPENSSH_DEPS_DIR}")
++
++    set(LIBRESSL_VERSION "3.4.3.0")
++    set(LIBRESSL_ZIP_URL "https://github.com/PowerShell/LibreSSL/releases/download/V${LIBRESSL_VERSION}/LibreSSL.zip")
++
++    file(DOWNLOAD "${LIBRESSL_ZIP_URL}" "${OPENSSH_DEPS_DIR}/LibreSSL.zip"
++        EXPECTED_HASH "SHA256=6CA33ACF85377B8DFC67810EF295CB8F28879135E0752834986BC8CE597710B2")
++    file(ARCHIVE_EXTRACT INPUT "${OPENSSH_DEPS_DIR}/LibreSSL.zip" DESTINATION "${OPENSSH_DEPS_DIR}")
++
++    set(FIDO2_VERSION "1.10.0")
++    set(FIDO2_ZIP_URL "https://github.com/PowerShell/libfido2/releases/download/${FIDO2_VERSION}/libfido2.zip")
++
++    file(DOWNLOAD "${FIDO2_ZIP_URL}" "${OPENSSH_DEPS_DIR}/libfido2.zip"
++        EXPECTED_HASH "SHA256=4060F42974B166C66166FBA30D660D518E16A76EB105EEA912C9E2851FE375A4")
++    file(ARCHIVE_EXTRACT INPUT "${OPENSSH_DEPS_DIR}/libfido2.zip" DESTINATION "${OPENSSH_DEPS_DIR}/libfido2")
++endif()
++
++# detect zlib
++
++find_path(ZLIB_INCLUDE_DIR
++    NAMES "zlib.h"
++    HINTS ${ZLIB_INCLUDE_DIR}
++        "${OPENSSH_DEPS_DIR}/ZLib/sdk")
++
++find_library(ZLIB_LIBRARY
++    NAMES libz.a zlib z
++    PATHS ${ZLIB_LIBRARY_DIR}
++        "${OPENSSH_DEPS_DIR}/ZLib/bin/${TARGET_ARCH}"
++    NO_CMAKE_FIND_ROOT_PATH
++    REQUIRED)
++
++get_filename_component(ZLIB_LIBRARY_DIR ${ZLIB_LIBRARY} DIRECTORY CACHE)
++
++add_library(zlib STATIC IMPORTED GLOBAL)
++set_target_properties(zlib PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${ZLIB_INCLUDE_DIR}")
++set_target_properties(zlib PROPERTIES IMPORTED_LOCATION "${ZLIB_LIBRARY}")
++
++# detect libressl
++
++find_path(LIBRESSL_INCLUDE_DIR
++    NAMES "openssl/opensslv.h"
++    HINTS ${LIBRESSL_INCLUDE_DIR}
++        "${OPENSSH_DEPS_DIR}/LibreSSL/sdk/include")
++
++find_library(LIBRESSL_LIBRARY
++    NAMES libcrypto.a crypto.lib libcrypto crypto
++    HINTS ${LIBRESSL_LIBRARY_DIR}
++        "${OPENSSH_DEPS_DIR}/LibreSSL/bin/desktop/${TARGET_ARCH}"
++    NO_CMAKE_FIND_ROOT_PATH
++    REQUIRED)
++
++get_filename_component(LIBRESSL_LIBRARY_DIR ${LIBRESSL_LIBRARY} DIRECTORY CACHE)
++
++add_library(libcrypto STATIC IMPORTED GLOBAL)
++set_target_properties(libcrypto PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${LIBRESSL_INCLUDE_DIR}")
++set_target_properties(libcrypto PROPERTIES IMPORTED_LOCATION "${LIBRESSL_LIBRARY}")
++
++# detect libfido2
++
++find_path(FIDO2_INCLUDE_DIR
++    NAMES "include/fido.h"
++    HINTS ${FIDO2_INCLUDE_DIR}
++        "${OPENSSH_DEPS_DIR}/libfido2")
++
++find_library(FIDO2_LIBRARY
++    NAMES libfido2.a fido2.lib fido2
++    HINTS ${FIDO2_LIBRARY_DIR}
++        "${OPENSSH_DEPS_DIR}/libfido2/${FIDO2_ARCH}/Release/static"
++    CMAKE_FIND_ROOT_PATH_BOTH
++    REQUIRED)
++
++get_filename_component(FIDO2_LIBRARY_DIR ${FIDO2_LIBRARY} DIRECTORY CACHE)
++
++add_library(libfido2 STATIC IMPORTED GLOBAL)
++set_target_properties(libfido2 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${LIBFIDO2_INCLUDE_DIR}")
++set_target_properties(libfido2 PROPERTIES IMPORTED_LOCATION "${FIDO2_LIBRARY}")
++
++if(EXISTS "${LIBRESSL_LIBRARY_DIR}/libcrypto.dll")
++    set(LIBRESSL_LIBCRYPTO_DLL "${LIBRESSL_LIBRARY_DIR}/libcrypto.dll")
++endif()
++
++# detect libcbor
++
++find_path(CBOR_INCLUDE_DIR
++    NAMES "include/cbor.h"
++    HINTS ${CBOR_INCLUDE_DIR}
++        "${OPENSSH_DEPS_DIR}/libfido2")
++
++find_library(CBOR_LIBRARY
++    NAMES libcbor.a cbor.lib cbor
++    HINTS ${CBOR_LIBRARY_DIR}
++        "${OPENSSH_DEPS_DIR}/libfido2/${FIDO2_ARCH}/Release/static"
++    CMAKE_FIND_ROOT_PATH_BOTH
++    REQUIRED)
++
++get_filename_component(CBOR_LIBRARY_DIR ${CBOR_LIBRARY} DIRECTORY CACHE)
++
++add_library(libcbor STATIC IMPORTED GLOBAL)
++set_target_properties(libcbor PROPERTIES IMPORTED_LOCATION "${FIDO2_LIBRARY}")
++
++include_directories("${ZLIB_INCLUDE_DIR}")
++include_directories("${LIBRESSL_INCLUDE_DIR}")
++include_directories("${FIDO2_INCLUDE_DIR}")
++
++set(OPENSSH_DEPENDENCIES zlib libcrypto libfido2 libcbor)
++
++# system libraries
++
++if(WIN32)
++    set(OPENSSH_SYSTEM_LIBRARIES
++        bcrypt.lib
++        Userenv.lib
++        Crypt32.lib
++        Ws2_32.lib
++        Secur32.lib
++        Shlwapi.lib
++        kernel32.lib
++        user32.lib
++        gdi32.lib
++        winspool.lib
++        comdlg32.lib
++        advapi32.lib
++        shell32.lib
++        ole32.lib
++        oleaut32.lib
++        uuid.lib
++        odbc32.lib
++        odbccp32.lib
++        Netapi32.lib
++        Rpcrt4.lib
++        ntdll.lib)
++else()
++    set(OPENSSH_SYSTEM_LIBRARIES resolv util)
++    if(NOT APPLE)
++        list(APPEND OPENSSH_SYSTEM_LIBRARIES crypt)
++    endif()
++    list(APPEND OPENSSH_SYSTEM_LIBRARIES pthread)
++endif()
++
++# config
++
++if(WIN32)
++    file(MAKE_DIRECTORY "${OPENSSH_WIN32_BIN_DIR}/openssh")
++    file(MAKE_DIRECTORY "${OPENSSH_WIN32_BIN_DIR}/win32compat/inc")
++
++    execute_process(COMMAND "powershell.exe"
++        "-Executionpolicy" "Bypass"
++        "-File" "${OPENSSH_WIN32_SRC_DIR}/openssh/config.ps1"
++        "-Config_h_vs" "${OPENSSH_WIN32_SRC_DIR}/openssh/config.h.vs"
++        "-Config_h" "${OPENSSH_SRC_DIR}/config.h"
++        "-VCIncludePath" "${VC_INCLUDE_PATH}"
++        "-OutCRTHeader" "${OPENSSH_WIN32_SRC_DIR}/win32compat/inc/crtheaders.h"
++        WORKING_DIRECTORY "${OPENSSH_WIN32_SRC_DIR}/openssh")
++else()
++    set(BROKEN_CLOSEFROM 1)
++    set(BROKEN_STRNVIS 1)
++    set(DISABLE_WTMPX 1)
++    set(ENABLE_PKCS11 "/**/")
++    set(ENABLE_SK "/**/")
++    set(GETPGRP_VOID 1)
++    set(GLOB_HAS_ALTDIRFUNC 1)
++    set(HAS_SHADOW_EXPIRE 1)
++    set(HAVE_ADDR_IN_UTMP 1)
++    set(HAVE_ADDR_IN_UTMPX 1)
++    set(HAVE_ADDR_V6_IN_UTMP 1)
++    set(HAVE_ADDR_V6_IN_UTMPX 1)
++    set(HAVE_ASPRINTF 1)
++    set(HAVE_ATTRIBUTE__NONNULL__ 1)
++    set(HAVE_BASENAME 1)
++    set(HAVE_BCOPY 1)
++    set(HAVE_BN_IS_PRIME_EX 1)
++    set(HAVE_BZERO 1)
++    set(HAVE_CALLOC 1)
++    set(HAVE_CLOCK 1)
++    set(HAVE_CLOCK_GETTIME 1)
++    set(HAVE_CLOCK_T 1)
++    set(HAVE_CONST_GAI_STRERROR_PROTO 1)
++    set(HAVE_CONTROL_IN_MSGHDR 1)
++    set(HAVE_CRYPT 1)
++    set(HAVE_DAEMON 1)
++    set(HAVE_DECL_AI_NUMERICSERV 1)
++    set(HAVE_DECL_BZERO 1)
++    set(HAVE_DECL_GETPEEREID 0)
++    set(HAVE_DECL_GLOB_NOMATCH 1)
++    set(HAVE_DECL_HOWMANY 1)
++    set(HAVE_DECL_H_ERRNO 1)
++    set(HAVE_DECL_MAXSYMLINKS 1)
++    set(HAVE_DECL_MEMMEM 0)
++    set(HAVE_DECL_NFDBITS 1)
++    set(HAVE_DECL_OFFSETOF 1)
++    set(HAVE_DECL_O_NONBLOCK 1)
++    set(HAVE_DECL_READV 1)
++    set(HAVE_DECL_SHUT_RD 1)
++    set(HAVE_DECL_UINT32_MAX 1)
++    set(HAVE_DECL_WRITEV 1)
++    set(HAVE_DECL__GETLONG 0)
++    set(HAVE_DECL__GETSHORT 0)
++    set(HAVE_DES_CRYPT 1)
++    set(HAVE_DH_GET0_KEY 1)
++    set(HAVE_DH_GET0_PQG 1)
++    set(HAVE_DH_SET0_KEY 1)
++    set(HAVE_DH_SET0_PQG 1)
++    set(HAVE_DH_SET_LENGTH 1)
++    set(HAVE_DIRFD 1)
++    set(HAVE_DIRNAME 1)
++    set(HAVE_DLOPEN 1)
++    set(HAVE_DSA_GENERATE_PARAMETERS_EX 1)
++    set(HAVE_DSA_GET0_KEY 1)
++    set(HAVE_DSA_GET0_PQG 1)
++    set(HAVE_DSA_SET0_KEY 1)
++    set(HAVE_DSA_SET0_PQG 1)
++    set(HAVE_DSA_SIG_GET0 1)
++    set(HAVE_DSA_SIG_SET0 1)
++    set(HAVE_ECDSA_SIG_GET0 1)
++    set(HAVE_ECDSA_SIG_SET0 1)
++    set(HAVE_EC_KEY_METHOD_NEW 1)
++    set(HAVE_ENDGRENT 1)
++    set(HAVE_ENDUTENT 1)
++    set(HAVE_ENDUTXENT 1)
++    set(HAVE_ERR 1)
++    set(HAVE_ERRX 1)
++    set(HAVE_EVP_CHACHA20 1)
++    set(HAVE_EVP_CIPHER_CTX_CTRL 1)
++    set(HAVE_EVP_CIPHER_CTX_IV 0)
++    set(HAVE_EVP_CIPHER_CTX_IV_NOCONST 0)
++    set(HAVE_EVP_DIGESTFINAL_EX 1)
++    set(HAVE_EVP_DIGESTINIT_EX 1)
++    set(HAVE_EVP_MD_CTX_COPY_EX 1)
++    set(HAVE_EVP_MD_CTX_FREE 1)
++    set(HAVE_EVP_MD_CTX_NEW 1)
++    set(HAVE_EVP_PKEY_GET0_RSA 1)
++    set(HAVE_EVP_SHA256 1)
++    set(HAVE_EVP_SHA384 1)
++    set(HAVE_EVP_SHA512 1)
++    set(HAVE_EXIT_IN_UTMP 1)
++    set(HAVE_EXPLICIT_BZERO 1)
++    set(HAVE_FCHMOD 1)
++    set(HAVE_FCHMODAT 1)
++    set(HAVE_FCHOWN 1)
++    set(HAVE_FCHOWNAT 1)
++    set(HAVE_FD_MASK 1)
++    set(HAVE_FLOCK 1)
++    set(HAVE_FNMATCH 0)
++    set(HAVE_FNMATCH_H 0)
++    set(HAVE_FREEADDRINFO 1)
++    set(HAVE_FSBLKCNT_T 1)
++    set(HAVE_FSFILCNT_T 1)
++    set(HAVE_FSTATFS 1)
++    set(HAVE_FSTATVFS 1)
++    set(HAVE_FUTIMES 1)
++    set(HAVE_GAI_STRERROR 1)
++    set(HAVE_GETADDRINFO 1)
++    set(HAVE_GETCWD 1)
++    set(HAVE_GETGROUPLIST 1)
++    set(HAVE_GETLINE 1)
++    set(HAVE_GETNAMEINFO 1)
++    set(HAVE_GETOPT 1)
++    set(HAVE_GETPAGESIZE 1)
++    set(HAVE_GETPGID 1)
++    set(HAVE_GETPGRP 1)
++    set(HAVE_GETRANDOM 1)
++    set(HAVE_GETRLIMIT 1)
++    set(HAVE_GETSID 1)
++    set(HAVE_GETTIMEOFDAY 1)
++    set(HAVE_GETTTYENT 1)
++    set(HAVE_GETUTENT 1)
++    set(HAVE_GETUTID 1)
++    set(HAVE_GETUTLINE 1)
++    set(HAVE_GETUTXENT 1)
++    set(HAVE_GETUTXID 1)
++    set(HAVE_GETUTXLINE 1)
++    set(HAVE_GLOB 1)
++    set(HAVE_HEADER_AD 1)
++    set(HAVE_HOST_IN_UTMP 1)
++    set(HAVE_HOST_IN_UTMPX 1)
++    set(HAVE_ID_IN_UTMP 1)
++    set(HAVE_ID_IN_UTMPX 1)
++    set(HAVE_INET_ATON 1)
++    set(HAVE_INET_NTOA 1)
++    set(HAVE_INET_NTOP 1)
++    set(HAVE_INNETGR 1)
++    set(HAVE_INT64_T 1)
++    set(HAVE_INTMAX_T 1)
++    set(HAVE_INTXX_T 1)
++    set(HAVE_IN_ADDR_T 1)
++    set(HAVE_IN_PORT_T 1)
++    set(HAVE_ISBLANK 1)
++    set(HAVE_LIBZ 1)
++    set(HAVE_LLABS 1)
++    set(HAVE_LOCALTIME_R 1)
++    set(HAVE_LOGIN 1)
++    set(HAVE_LOGOUT 1)
++    set(HAVE_LOGWTMP 1)
++    set(HAVE_LONG_DOUBLE 1)
++    set(HAVE_LONG_LONG 1)
++    set(HAVE_MALLOC 1)
++    set(HAVE_MBLEN 1)
++    set(HAVE_MBTOWC 1)
++    set(HAVE_MEMMEM 1)
++    set(HAVE_MEMMOVE 1)
++    set(HAVE_MKDTEMP 1)
++    set(HAVE_MODE_T 1)
++    set(HAVE_NANOSLEEP 1)
++    set(HAVE_NFDS_T 1)
++    set(HAVE_NL_LANGINFO 1)
++    set(HAVE_OPENPTY 1)
++    set(HAVE_OPENSSL_ADD_ALL_ALGORITHMS 1)
++    set(HAVE_OPENSSL_INIT_CRYPTO 1)
++    set(HAVE_OPENSSL_VERSION 1)
++    set(HAVE_OPENSSL_VERSION_NUM 1)
++    set(HAVE_PID_IN_UTMP 1)
++    set(HAVE_PID_T 1)
++    set(HAVE_POLL 1)
++    set(HAVE_PPOLL 1)
++    set(HAVE_PRCTL 1)
++    set(HAVE_PROC_PID 1)
++    set(HAVE_PSELECT 1)
++    set(HAVE_PUTUTLINE 1)
++    set(HAVE_PUTUTXLINE 1)
++    set(HAVE_RAISE 1)
++    set(HAVE_REALLOC 1)
++    set(HAVE_REALLOCARRAY 1)
++    set(HAVE_REALPATH 1)
++    set(HAVE_RECVMSG 1)
++    set(HAVE_RLIMIT_NPROC "/**/")
++    set(HAVE_RRESVPORT_AF 1)
++    set(HAVE_RSA_GENERATE_KEY_EX 1)
++    set(HAVE_RSA_GET0_CRT_PARAMS 1)
++    set(HAVE_RSA_GET0_FACTORS 1)
++    set(HAVE_RSA_GET0_KEY 1)
++    set(HAVE_RSA_GET_DEFAULT_METHOD 1)
++    set(HAVE_RSA_METH_DUP 1)
++    set(HAVE_RSA_METH_FREE 1)
++    set(HAVE_RSA_METH_GET_FINISH 1)
++    set(HAVE_RSA_METH_SET1_NAME 1)
++    set(HAVE_RSA_METH_SET_FINISH 1)
++    set(HAVE_RSA_METH_SET_PRIV_DEC 1)
++    set(HAVE_RSA_METH_SET_PRIV_ENC 1)
++    set(HAVE_RSA_SET0_CRT_PARAMS 1)
++    set(HAVE_RSA_SET0_FACTORS 1)
++    set(HAVE_RSA_SET0_KEY 1)
++    set(HAVE_SA_FAMILY_T 1)
++    set(HAVE_SENDMSG 1)
++    set(HAVE_SETEGID 1)
++    set(HAVE_SETENV 1)
++    set(HAVE_SETEUID 1)
++    set(HAVE_SETGROUPS 1)
++    set(HAVE_SETLINEBUF 1)
++    set(HAVE_SETREGID 1)
++    set(HAVE_SETRESGID 1)
++    set(HAVE_SETRESUID 1)
++    set(HAVE_SETREUID 1)
++    set(HAVE_SETRLIMIT 1)
++    set(HAVE_SETSID 1)
++    set(HAVE_SETUTENT 1)
++    set(HAVE_SETUTXENT 1)
++    set(HAVE_SETVBUF 1)
++    set(HAVE_SIGACTION 1)
++    set(HAVE_SIG_ATOMIC_T 1)
++    set(HAVE_SIZE_T 1)
++    set(HAVE_SNPRINTF 1)
++    set(HAVE_SOCKETPAIR 1)
++    set(HAVE_SO_PEERCRED 1)
++    set(HAVE_SSIZE_T 1)
++    set(HAVE_SS_FAMILY_IN_SS 1)
++    set(HAVE_STATFS 1)
++    set(HAVE_STATVFS 1)
++    set(HAVE_STRCASESTR 1)
++    set(HAVE_STRDUP 1)
++    set(HAVE_STRERROR 1)
++    set(HAVE_STRFTIME 1)
++    set(HAVE_STRNDUP 1)
++    set(HAVE_STRNLEN 1)
++    set(HAVE_STRPTIME 1)
++    set(HAVE_STRSEP 1)
++    set(HAVE_STRSIGNAL 1)
++    set(HAVE_STRTOLL 1)
++    set(HAVE_STRTOUL 1)
++    set(HAVE_STRTOULL 1)
++    set(HAVE_STRUCT_ADDRINFO 1)
++    set(HAVE_STRUCT_IN6_ADDR 1)
++    set(HAVE_STRUCT_PASSWD_PW_GECOS 1)
++    set(HAVE_STRUCT_POLLFD_FD 1)
++    set(HAVE_STRUCT_SOCKADDR_IN6 1)
++    set(HAVE_STRUCT_SOCKADDR_IN6_SIN6_SCOPE_ID 1)
++    set(HAVE_STRUCT_SOCKADDR_STORAGE 1)
++    set(HAVE_STRUCT_STATFS_F_FILES 1)
++    set(HAVE_STRUCT_STATFS_F_FLAGS 1)
++    set(HAVE_STRUCT_STAT_ST_BLKSIZE 1)
++    set(HAVE_STRUCT_STAT_ST_MTIM 1)
++    set(HAVE_STRUCT_STAT_ST_MTIME 1)
++    set(HAVE_STRUCT_TIMESPEC 1)
++    set(HAVE_STRUCT_TIMEVAL 1)
++    set(HAVE_SYSCONF 1)
++    set(HAVE_SYS_ERRLIST 1)
++    set(HAVE_SYS_NERR 1)
++    set(HAVE_TCGETPGRP 1)
++    set(HAVE_TCSENDBREAK 1)
++    set(HAVE_TIME 1)
++    set(HAVE_TRUNCATE 1)
++    set(HAVE_TV_IN_UTMP 1)
++    set(HAVE_TV_IN_UTMPX 1)
++    set(HAVE_TYPE_IN_UTMP 1)
++    set(HAVE_TYPE_IN_UTMPX 1)
++    set(HAVE_UINTMAX_T 1)
++    set(HAVE_UINTXX_T 1)
++    set(HAVE_UNSETENV 1)
++    set(HAVE_UNSIGNED_LONG_LONG 1)
++    set(HAVE_UPDWTMP 1)
++    set(HAVE_UPDWTMPX 1)
++    set(HAVE_USLEEP 1)
++    set(HAVE_UTIMENSAT 1)
++    set(HAVE_UTIMES 1)
++    set(HAVE_UTMPNAME 1)
++    set(HAVE_UTMPXNAME 1)
++    set(HAVE_VASPRINTF 1)
++    set(HAVE_VA_COPY 1)
++    set(HAVE_VSNPRINTF 1)
++    set(HAVE_WAITPID 1)
++    set(HAVE_WARN 1)
++    set(HAVE_WCWIDTH 1)
++    set(HAVE__GETLONG 1)
++    set(HAVE__GETSHORT 1)
++    set(HAVE__RES_EXTERN 1)
++    set(HAVE___FUNCTION__ 1)
++    set(HAVE___PROGNAME 1)
++    set(HAVE___VA_COPY 1)
++    set(HAVE___func__ 1)
++    set(IPV4_IN_IPV6 1)
++    set(LINK_OPNOTSUPP_ERRNO "EPERM")
++    set(LINUX_OOM_ADJUST 1)
++    set(LOCKED_PASSWD_PREFIX "!")
++    set(OPENSSL_HAS_ECC 1)
++    set(OPENSSL_HAS_NISTP256 1)
++    set(OPENSSL_HAS_NISTP384 1)
++    set(OPENSSL_HAS_NISTP521 1)
++    set(OPENSSL_HAVE_EVPCTR 1)
++    set(OPENSSL_HAVE_EVPGCM 1)
++    set(OPENSSL_PRNG_ONLY 1)
++    set(PACKAGE_BUGREPORT "openssh-unix-dev@mindrot.org")
++    set(PACKAGE_NAME "OpenSSH")
++    set(PACKAGE_STRING "OpenSSH Portable")
++    set(PACKAGE_TARNAME "openssh")
++    set(PACKAGE_URL "")
++    set(PACKAGE_VERSION "Portable")
++    set(PAM_TTY_KLUDGE 1)
++    set(SANDBOX_SECCOMP_FILTER 1)
++    set(SECCOMP_AUDIT_ARCH "AUDIT_ARCH_X86_64")
++    set(SIZEOF_INT 4)
++    set(SIZEOF_LONG_INT 8)
++    set(SIZEOF_LONG_LONG_INT 8)
++    set(SIZEOF_SHORT_INT 2)
++    set(SIZEOF_TIME_T 8)
++    set(SNPRINTF_CONST "const")
++    set(SPT_TYPE "SPT_REUSEARGV")
++    set(SSH_PRIVSEP_USER "sshd")
++    set(SSH_TUN_COMPAT_AF 1)
++    set(SSH_TUN_PREPEND_AF 1)
++    set(STDC_HEADERS 1)
++    set(USER_PATH "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin")
++    set(USE_BTMP 1)
++    set(VARIABLE_DECLARATION_AFTER_CODE 1)
++    set(VARIABLE_LENGTH_ARRAYS 1)
++    set(WITH_OPENSSL 1)
++    set(WITH_ZLIB 1)
++    set(XAUTH_PATH "/usr/bin/xauth")
++    set(_PATH_BTMP "/var/log/btmp")
++    set(_PATH_PASSWD_PROG "/usr/bin/passwd")
++    set(_PATH_SSH_PIDDIR "/var/run")
++
++    check_include_files("stddef.h" HAVE_STDDEF_H)
++    check_include_files("stdint.h" HAVE_STDINT_H)
++    check_include_files("stdlib.h" HAVE_STDLIB_H)
++    check_include_files("unistd.h" HAVE_UNISTD_H)
++    check_include_files("strings.h" HAVE_STRINGS_H)
++    check_include_files("string.h" HAVE_STRING_H)
++    check_include_files("wchar.h" HAVE_WCHAR_H)
++    check_include_files("time.h" HAVE_TIME_H)
++    check_include_files("utime.h" HAVE_UTIME_H)
++
++    check_include_files("elf.h" HAVE_ELF_H)
++    check_include_files("err.h" HAVE_ERR_H)
++    check_include_files("endian.h" HAVE_ENDIAN_H)
++    check_include_files("dirent.h" HAVE_DIRENT_H)
++    check_include_files("lastlog.h" HAVE_LASTLOG_H)
++    check_include_files("features.h" HAVE_FEATURES_H)
++    check_include_files("fcntl.h" HAVE_FCNTL_H)
++    check_include_files("getopt.h" HAVE_GETOPT_H)
++    check_include_files("glob.h" HAVE_GLOB_H)
++    check_include_files("ifaddrs.h" HAVE_IFADDRS_H)
++    check_include_files("inttypes.h" HAVE_INTTYPES_H)
++    check_include_files("langinfo.h" HAVE_LANGINFO_H)
++    check_include_files("limits.h" HAVE_LIMITS_H)
++    check_include_files("locale.h" HAVE_LOCALE_H)
++    check_include_files("memory.h" HAVE_MEMORY_H)
++    check_include_files("netdb.h" HAVE_NETDB_H)
++    check_include_files("net/route.h" HAVE_NET_ROUTE_H)
++    check_include_files("paths.h" HAVE_PATHS_H)
++    check_include_files("poll.h" HAVE_POLL_H)
++    check_include_files("pty.h" HAVE_PTY_H)
++    check_include_files("ttyent.h" HAVE_TTYENT_H)
++    check_include_files("utmpx.h" HAVE_UTMPX_H)
++    check_include_files("utmp.h" HAVE_UTMP_H)
++    check_include_files("rpc/types.h" HAVE_RPC_TYPES_H)
++    check_include_files("pam/pam_appl.h" HAVE_PAM_PAM_APPL_H)
++    check_include_files("security/pam_appl.h" HAVE_SECURITY_PAM_APPL_H)
++
++    check_include_files("sys/cdefs.h" HAVE_SYS_CDEFS_H)
++    check_include_files("sys/dir.h" HAVE_SYS_DIR_H)
++    check_include_files("sys/file.h" HAVE_SYS_FILE_H)
++    check_include_files("sys/mman.h" HAVE_SYS_MMAN_H)
++    check_include_files("sys/mount.h" HAVE_SYS_MOUNT_H)
++    check_include_files("sys/param.h" HAVE_SYS_PARAM_H)
++    check_include_files("sys/poll.h" HAVE_SYS_POLL_H)
++    check_include_files("sys/prctl.h" HAVE_SYS_PRCTL_H)
++    check_include_files("sys/ptrace.h" HAVE_SYS_PTRACE_H)
++    check_include_files("sys/random.h" HAVE_SYS_RANDOM_H)
++    check_include_files("sys/select.h" HAVE_SYS_SELECT_H)
++    check_include_files("sys/statvfs.h" HAVE_SYS_STATVFS_H)
++    check_include_files("sys/stat.h" HAVE_SYS_STAT_H)
++    check_include_files("sys/sysctl.h" HAVE_SYS_SYSCTL_H)
++    check_include_files("sys/time.h" HAVE_SYS_TIME_H)
++    check_include_files("sys/types.h" HAVE_SYS_TYPES_H)
++    check_include_files("sys/un.h" HAVE_SYS_UN_H)
++    check_include_files("sys/vfs.h" HAVE_SYS_VFS_H)
++    check_include_files("sys/bitypes.h" HAVE_SYS_BITYPES_H)
++    check_include_files("sys/sysmacros.h" HAVE_SYS_SYSMACROS_H)
++
++    check_include_files("crypt.h" HAVE_CRYPT_H)
++    check_include_files("shadow.h" HAVE_SHADOW_H)
++    check_include_files("libgen.h" HAVE_LIBGEN_H)
++    check_include_files("libproc.h" HAVE_LIBPROC_H)
++    check_include_files("bsd/libutil.h" HAVE_BSD_LIBUTIL_H)
++    check_include_files("libutil.h" HAVE_LIBUTIL_H)
++
++    set(HAVE_U_CHAR 1)
++    set(HAVE_U_INT 1)
++    set(HAVE_U_INT64_T 1)
++    set(HAVE_U_INTXX_T 1)
++
++    if(UNIX AND NOT APPLE)
++        set(SSH_TUN_LINUX 1)
++        set(SYS_RDOMAIN_LINUX 1)
++        set(HAVE_LINUX_AUDIT_H 1)
++        set(HAVE_LINUX_FILTER_H 1)
++        set(HAVE_LINUX_IF_TUN_H 1)
++        set(HAVE_LINUX_SECCOMP_H 1)
++    endif()
++
++    if(APPLE)
++        set(USE_BTMP 0)
++        set(USE_UTMPX 0)
++        set(HAVE_CRYPT 0)
++        set(HAVE_PRCTL 0)
++        set(HAVE_PPOLL 0)
++        set(HAVE_LOGIN 0)
++        set(HAVE_LOGOUT 0)
++        set(HAVE_LOGWTMP 0)
++        set(HAVE_OPENPTY 0)
++        set(HAVE_STRLCPY 1)
++        set(HAVE_STRLCAT 1)
++        set(HAVE_STRTONUM 1)
++        set(HAVE_SETREGID 0)
++        set(HAVE_SETRESGID 0)
++        set(HAVE_SETRESUID 0)
++        set(HAVE_SETREUID 0)
++        set(HAVE_SETUTENT 0)
++        set(HAVE_SETUTXENT 0)
++        set(HAVE_TV_IN_UTMP 0)
++        set(HAVE_ID_IN_UTMP 0)
++        set(HAVE_PID_IN_UTMP 0)
++        set(HAVE_TYPE_IN_UTMP 0)
++        set(HAVE_ADDR_IN_UTMP 0)
++        set(HAVE_ADDR_IN_UTMPX 0)
++        set(HAVE_ADDR_V6_IN_UTMP 0)
++        set(HAVE_ADDR_V6_IN_UTMPX 0)
++        set(HAVE_STRUCT_STAT_ST_MTIM 0)
++        set(HAVE_GETOPT_OPTRESET 1)
++        set(HAVE_GETPAGESIZE 0)
++        set(HAVE_REALLOCARRAY 0)
++        set(HAVE_EXPLICIT_BZERO 0)
++        set(SANDBOX_DARWIN 1)
++        set(SANDBOX_SECCOMP_FILTER 0)
++    elseif(ANDROID)
++        set(DISABLE_SHADOW 1)
++        set(HAVE_REALLOCARRAY 0)
++        set(HAVE_EXPLICIT_BZERO 1)
++    else() # Linux
++        set(HAVE_ARC4RANDOM_LIBCRYPTO 1)
++    endif()
++
++    configure_file("${OPENSSH_SRC_DIR}/cmake-config.h.in"
++        "${OPENSSH_SRC_DIR}/config.h")
++endif()
++
++# global include directories
++
++set(OPENSSH_GLOBAL_INCLUDE_DIRS
++    "${OPENSSH_BIN_DIR}"
++    "${OPENSSH_SRC_DIR}"
++    "${OPENSSH_SRC_DIR}/include"
++    "${OPENSSH_SRC_DIR}/openbsd-compat")
++
++if(WIN32)
++    list(APPEND OPENSSH_GLOBAL_INCLUDE_DIRS
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat")
++endif()
++
++include_directories(${OPENSSH_GLOBAL_INCLUDE_DIRS})
++
++if(WIN32)
++    set(WIN32_COMPAT_INCLUDE_DIRS
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc"
++        "${OPENSSH_BIN_DIR}/contrib/win32/win32compat/inc")
++
++    include_directories(BEFORE SYSTEM ${WIN32_COMPAT_INCLUDE_DIRS})
++endif()
++
++# posix_compat
++
++if(WIN32)
++    set(OPENSSH_POSIX_COMPAT_HEADERS
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32fd.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/fcntl.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/signal.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/select.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/socket.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/stat.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/time.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/wait.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/unistd.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/poll.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/statvfs.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/dlfcn.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/syslog.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/signal_internal.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/utf.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/arpa/inet.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/arpa/nameser.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/grp.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/libgen.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/netdb.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/netinet/in.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/netinet/in_systm.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/netinet/ip.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/netinet/tcp.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/resolv.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/ioctl.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/resource.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/uio.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/un.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/termios.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/dirent.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/pwd.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/misc_internal.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/stdio.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/string.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/strings.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/sys/types.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/ctype.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/stdlib.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/debug.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/console.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/tnnet.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/spawn.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/net/if.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/time.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/inc/gssapi.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/MicrosoftTelemetry.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/sshTelemetry.h"
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/sshTelemetryInternal.h")
++
++    set(OPENSSH_POSIX_COMPAT_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32fd.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/signal.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/socketio.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/fileio.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/termio.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/misc.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/signal_sigalrm.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/signal_sigchld.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32api_proxies.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_usertoken_utils.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32log.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/pwd.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_dirent.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/no-ops.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/ansiprsr.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/console.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/tncon.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/tnnet.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/utf.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/spawn.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/signal_wait.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_pty.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/gss-sspi.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/sshTelemetry.c")
++
++    add_library(posix_compat STATIC
++        ${OPENSSH_POSIX_COMPAT_HEADERS}
++        ${OPENSSH_POSIX_COMPAT_SOURCES})
++
++    set_target_properties(posix_compat PROPERTIES
++        INCLUDE_DIRECTORIES "")
++endif()
++
++# openbsd_compat
++
++set(OPENSSH_OPENBSD_COMPAT_HEADERS
++    "${OPENSSH_SRC_DIR}/openbsd-compat/base64.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/blf.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-cygwin_util.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-misc.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-nextstep.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-poll.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-setres_id.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-statvfs.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-waitpid.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/chacha_private.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/charclass.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/fake-rfc2553.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/getopt.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/getrrsetbyname.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/glob.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/md5.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/openbsd-compat.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/openssl-compat.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-aix.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-irix.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-linux.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-solaris.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-net.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-uw.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/readpassphrase.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/sha1.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/sha2.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/sys-queue.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/sys-tree.h"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/vis.h")
++
++set(OPENSSH_OPENBSD_COMPAT_SOURCES
++    "${OPENSSH_SRC_DIR}/openbsd-compat/arc4random.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/base64.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/basename.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bcrypt_pbkdf.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bindresvport.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/blowfish.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-asprintf.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-closefrom.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-cygwin_util.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-getline.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-getpagesize.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-getpeereid.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-misc.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-nextstep.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-openpty.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-poll.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-pselect.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-setres_id.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-snprintf.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-statvfs.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/bsd-waitpid.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/daemon.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/dirname.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/explicit_bzero.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/fake-rfc2553.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/fmt_scaled.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/getcwd.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/getgrouplist.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/getopt_long.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/getrrsetbyname-ldns.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/inet_aton.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/inet_ntoa.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/inet_ntop.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/kludge-fd_set.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/libressl-api-compat.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/md5.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/memmem.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/mktemp.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/openssl-compat.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-irix.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-linux.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-solaris.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-net.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/port-uw.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/readpassphrase.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/reallocarray.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/recallocarray.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/rresvport.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/setenv.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/setproctitle.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/sha1.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/sha2.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strlcat.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strlcpy.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strmode.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strptime.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strsep.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strtoll.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strtonum.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strtoul.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strtoull.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/timingsafe_bcmp.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/vis.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/xcrypt.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/glob.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strcasestr.c"
++    "${OPENSSH_SRC_DIR}/openbsd-compat/strndup.c")
++
++if(NOT WIN32)
++    list(APPEND OPENSSH_OPENBSD_COMPAT_SOURCES
++        "${OPENSSH_SRC_DIR}/openbsd-compat/getrrsetbyname.c"
++        "${OPENSSH_SRC_DIR}/openbsd-compat/pwcache.c"
++        "${OPENSSH_SRC_DIR}/openbsd-compat/freezero.c")
++endif()
++
++add_library(openbsd_compat STATIC
++    ${OPENSSH_OPENBSD_COMPAT_HEADERS}
++    ${OPENSSH_OPENBSD_COMPAT_SOURCES})
++
++target_include_directories(openbsd_compat PRIVATE ${OPENSSH_GLOBAL_INCLUDE_DIRS})
++
++if(WIN32)
++    target_include_directories(openbsd_compat SYSTEM BEFORE PRIVATE ${WIN32_COMPAT_INCLUDE_DIRS})
++    set_target_properties(openbsd_compat PROPERTIES LINK_FLAGS "/ignore:4221")
++else()
++    target_link_libraries(openbsd_compat dl)
++endif()
++
++# libssh
++
++set(OPENSSH_LIBSSH_SOURCES
++    "${OPENSSH_SRC_DIR}/addr.c"
++    "${OPENSSH_SRC_DIR}/addrmatch.c"
++    "${OPENSSH_SRC_DIR}/atomicio.c"
++    "${OPENSSH_SRC_DIR}/authfd.c"
++    "${OPENSSH_SRC_DIR}/authfile.c"
++    "${OPENSSH_SRC_DIR}/bitmap.c"
++    "${OPENSSH_SRC_DIR}/canohost.c"
++    "${OPENSSH_SRC_DIR}/chacha.c"
++    "${OPENSSH_SRC_DIR}/channels.c"
++    "${OPENSSH_SRC_DIR}/cipher-aes.c"
++    "${OPENSSH_SRC_DIR}/cipher-aesctr.c"
++    "${OPENSSH_SRC_DIR}/cipher-chachapoly.c"
++    "${OPENSSH_SRC_DIR}/cipher-ctr.c"
++    "${OPENSSH_SRC_DIR}/cipher.c"
++    "${OPENSSH_SRC_DIR}/cleanup.c"
++    "${OPENSSH_SRC_DIR}/compat.c")
++
++if(USE_OPENSSL)
++    list(APPEND OPENSSH_LIBSSH_SOURCES "${OPENSSH_SRC_DIR}/dh.c")
++endif()
++
++if(NOT USE_OPENSSL)
++    list(APPEND OPENSSH_LIBSSH_SOURCES "${OPENSSH_SRC_DIR}/digest-libc.c")
++endif()
++
++list(APPEND OPENSSH_LIBSSH_SOURCES
++    "${OPENSSH_SRC_DIR}/dispatch.c"
++    "${OPENSSH_SRC_DIR}/dns.c"
++    "${OPENSSH_SRC_DIR}/ed25519.c"
++    "${OPENSSH_SRC_DIR}/entropy.c"
++    "${OPENSSH_SRC_DIR}/fatal.c"
++    "${OPENSSH_SRC_DIR}/fe25519.c"
++    "${OPENSSH_SRC_DIR}/ge25519.c"
++    "${OPENSSH_SRC_DIR}/gss-genr.c"
++    "${OPENSSH_SRC_DIR}/hash.c"
++    "${OPENSSH_SRC_DIR}/hmac.c"
++    "${OPENSSH_SRC_DIR}/hostfile.c"
++    "${OPENSSH_SRC_DIR}/kex.c"
++    "${OPENSSH_SRC_DIR}/kexc25519.c")
++
++if(USE_OPENSSL)
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/kexdh.c"
++        "${OPENSSH_SRC_DIR}/kexecdh.c"
++        "${OPENSSH_SRC_DIR}/kexgex.c"
++        "${OPENSSH_SRC_DIR}/kexgexc.c")
++endif()
++
++list(APPEND OPENSSH_LIBSSH_SOURCES
++    "${OPENSSH_SRC_DIR}/kexgen.c"
++    "${OPENSSH_SRC_DIR}/kexsntrup761x25519.c"
++    "${OPENSSH_SRC_DIR}/krl.c"
++    "${OPENSSH_SRC_DIR}/log.c"
++    "${OPENSSH_SRC_DIR}/mac.c"
++    "${OPENSSH_SRC_DIR}/match.c"
++    "${OPENSSH_SRC_DIR}/misc.c"
++    "${OPENSSH_SRC_DIR}/moduli.c"
++    "${OPENSSH_SRC_DIR}/monitor_fdpass.c"
++    "${OPENSSH_SRC_DIR}/msg.c"
++    "${OPENSSH_SRC_DIR}/nchan.c"
++    "${OPENSSH_SRC_DIR}/packet.c"
++    "${OPENSSH_SRC_DIR}/poly1305.c"
++    "${OPENSSH_SRC_DIR}/progressmeter.c"
++    "${OPENSSH_SRC_DIR}/readpass.c"
++    "${OPENSSH_SRC_DIR}/rijndael.c"
++    "${OPENSSH_SRC_DIR}/sc25519.c"
++    "${OPENSSH_SRC_DIR}/smult_curve25519_ref.c"
++    "${OPENSSH_SRC_DIR}/sntrup761.c")
++
++if(USE_OPENSSL)
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/ssh-dss.c"
++        "${OPENSSH_SRC_DIR}/ssh-ecdsa.c")
++endif()
++
++list(APPEND OPENSSH_LIBSSH_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-ed25519.c"
++    "${OPENSSH_SRC_DIR}/ssh-pkcs11.c")
++
++if(USE_OPENSSL)
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/ssh-rsa.c")
++endif()
++
++list(APPEND OPENSSH_LIBSSH_SOURCES
++    "${OPENSSH_SRC_DIR}/sshbuf-getput-basic.c"
++    "${OPENSSH_SRC_DIR}/sshbuf-getput-crypto.c"
++    "${OPENSSH_SRC_DIR}/sshbuf-misc.c"
++    "${OPENSSH_SRC_DIR}/sshbuf.c"
++    "${OPENSSH_SRC_DIR}/ssherr.c"
++    "${OPENSSH_SRC_DIR}/sshkey.c"
++    "${OPENSSH_SRC_DIR}/ssh_api.c"
++    "${OPENSSH_SRC_DIR}/umac.c"
++    "${OPENSSH_SRC_DIR}/verify.c"
++    "${OPENSSH_SRC_DIR}/xmalloc.c"
++    "${OPENSSH_SRC_DIR}/platform-misc.c"
++    "${OPENSSH_SRC_DIR}/platform-pledge.c"
++    "${OPENSSH_SRC_DIR}/platform-tracing.c"
++    "${OPENSSH_SRC_DIR}/platform.c"
++    "${OPENSSH_SRC_DIR}/sandbox-pledge.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/ttymodes_windows.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32-sshfileperm.c")
++else()
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/ttymodes.c"
++        "${OPENSSH_SRC_DIR}/uidswap.c"
++        "${OPENSSH_SRC_DIR}/umac128.c"
++        "${OPENSSH_SRC_DIR}/mux.c")
++endif()
++
++if(USE_OPENSSL)
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/digest-openssl.c")
++endif()
++
++list(APPEND OPENSSH_LIBSSH_SOURCES
++    "${OPENSSH_SRC_DIR}/kexgexs.c"
++    "${OPENSSH_SRC_DIR}/ssh-ecdsa-sk.c"
++    "${OPENSSH_SRC_DIR}/ssh-ed25519-sk.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk.c"
++    "${OPENSSH_SRC_DIR}/sshbuf-io.c"
++    "${OPENSSH_SRC_DIR}/cipher-chachapoly-libcrypto.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_LIBSSH_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/spawn-ext.c")
++endif()
++
++set(OPENSSH_LIBSSH_HEADERS "")
++
++if(EXISTS "${OPENSSH_SRC_DIR}/sshfileperm.h")
++    list(APPEND OPENSSH_LIBSSH_HEADERS
++        "${OPENSSH_SRC_DIR}/sshfileperm.h")
++endif()
++
++add_library(libssh STATIC
++    ${OPENSSH_LIBSSH_HEADERS}
++    ${OPENSSH_LIBSSH_SOURCES})
++
++if(WIN32)
++    set_target_properties(libssh PROPERTIES LINK_FLAGS "/ignore:4221")
++endif()
++
++if(WIN32)
++    target_link_libraries(libssh posix_compat)
++endif()
++
++target_link_libraries(libssh openbsd_compat)
++
++if(WIN32)
++    if(DEFINED LIBRESSL_LIBCRYPTO_DLL)
++        add_custom_command(TARGET libssh POST_BUILD
++            COMMAND ${CMAKE_COMMAND} -E copy
++            "${LIBRESSL_LIBCRYPTO_DLL}" "$<TARGET_FILE_DIR:libssh>/libcrypto.dll")
++    endif()
++endif()
++
++# common executable definitions
++
++set(OPENSSH_COMMON_LIBRARIES libssh ${OPENSSH_DEPENDENCIES} ${OPENSSH_SYSTEM_LIBRARIES})
++
++if(WIN32)
++    set(OPENSSH_TARGETOS_MANIFEST
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/targetos.manifest")
++
++    set(OPENSSH_VERSION_RC
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/version.rc")
++endif()
++
++# ssh
++
++set(OPENSSH_SSH_SOURCES
++    "${OPENSSH_SRC_DIR}/clientloop.c"
++    "${OPENSSH_SRC_DIR}/readconf.c"
++    "${OPENSSH_SRC_DIR}/ssh.c"
++    "${OPENSSH_SRC_DIR}/sshconnect.c"
++    "${OPENSSH_SRC_DIR}/sshconnect2.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_sshtty.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c")
++else()
++    list(APPEND OPENSSH_SSH_SOURCES
++        "${OPENSSH_SRC_DIR}/sshtty.c"
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SSH_HEADERS
++    "${OPENSSH_SRC_DIR}/atomicio.h"
++    "${OPENSSH_SRC_DIR}/audit.h"
++    "${OPENSSH_SRC_DIR}/auth-options.h"
++    "${OPENSSH_SRC_DIR}/auth-pam.h"
++    "${OPENSSH_SRC_DIR}/auth-sia.h"
++    "${OPENSSH_SRC_DIR}/auth.h"
++    "${OPENSSH_SRC_DIR}/authfd.h"
++    "${OPENSSH_SRC_DIR}/authfile.h"
++    "${OPENSSH_SRC_DIR}/bitmap.h"
++    "${OPENSSH_SRC_DIR}/canohost.h"
++    "${OPENSSH_SRC_DIR}/chacha.h"
++    "${OPENSSH_SRC_DIR}/channels.h"
++    "${OPENSSH_SRC_DIR}/cipher-aesctr.h"
++    "${OPENSSH_SRC_DIR}/cipher-chachapoly.h"
++    "${OPENSSH_SRC_DIR}/cipher.h"
++    "${OPENSSH_SRC_DIR}/clientloop.h"
++    "${OPENSSH_SRC_DIR}/compat.h"
++    "${OPENSSH_SRC_DIR}/crypto_api.h"
++    "${OPENSSH_SRC_DIR}/defines.h"
++    "${OPENSSH_SRC_DIR}/dh.h"
++    "${OPENSSH_SRC_DIR}/digest.h"
++    "${OPENSSH_SRC_DIR}/dispatch.h"
++    "${OPENSSH_SRC_DIR}/dns.h"
++    "${OPENSSH_SRC_DIR}/entropy.h"
++    "${OPENSSH_SRC_DIR}/fe25519.h"
++    "${OPENSSH_SRC_DIR}/ge25519.h"
++    "${OPENSSH_SRC_DIR}/groupaccess.h"
++    "${OPENSSH_SRC_DIR}/hmac.h"
++    "${OPENSSH_SRC_DIR}/hostfile.h"
++    "${OPENSSH_SRC_DIR}/kex.h"
++    "${OPENSSH_SRC_DIR}/krl.h"
++    "${OPENSSH_SRC_DIR}/log.h"
++    "${OPENSSH_SRC_DIR}/loginrec.h"
++    "${OPENSSH_SRC_DIR}/mac.h"
++    "${OPENSSH_SRC_DIR}/match.h"
++    "${OPENSSH_SRC_DIR}/misc.h"
++    "${OPENSSH_SRC_DIR}/monitor.h"
++    "${OPENSSH_SRC_DIR}/monitor_fdpass.h"
++    "${OPENSSH_SRC_DIR}/monitor_wrap.h"
++    "${OPENSSH_SRC_DIR}/msg.h"
++    "${OPENSSH_SRC_DIR}/myproposal.h"
++    "${OPENSSH_SRC_DIR}/packet.h"
++    "${OPENSSH_SRC_DIR}/pathnames.h"
++    "${OPENSSH_SRC_DIR}/pkcs11.h"
++    "${OPENSSH_SRC_DIR}/platform.h"
++    "${OPENSSH_SRC_DIR}/poly1305.h"
++    "${OPENSSH_SRC_DIR}/progressmeter.h"
++    "${OPENSSH_SRC_DIR}/readconf.h"
++    "${OPENSSH_SRC_DIR}/rijndael.h"
++    "${OPENSSH_SRC_DIR}/sc25519.h"
++    "${OPENSSH_SRC_DIR}/servconf.h"
++    "${OPENSSH_SRC_DIR}/serverloop.h"
++    "${OPENSSH_SRC_DIR}/session.h"
++    "${OPENSSH_SRC_DIR}/sftp-client.h"
++    "${OPENSSH_SRC_DIR}/sftp-common.h"
++    "${OPENSSH_SRC_DIR}/sftp.h"
++    "${OPENSSH_SRC_DIR}/ssh-gss.h"
++    "${OPENSSH_SRC_DIR}/ssh-pkcs11.h"
++    "${OPENSSH_SRC_DIR}/ssh-sandbox.h"
++    "${OPENSSH_SRC_DIR}/ssh.h"
++    "${OPENSSH_SRC_DIR}/ssh2.h"
++    "${OPENSSH_SRC_DIR}/sshbuf.h"
++    "${OPENSSH_SRC_DIR}/sshconnect.h"
++    "${OPENSSH_SRC_DIR}/ssherr.h"
++    "${OPENSSH_SRC_DIR}/sshkey.h"
++    "${OPENSSH_SRC_DIR}/sshlogin.h"
++    "${OPENSSH_SRC_DIR}/sshpty.h"
++    "${OPENSSH_SRC_DIR}/ssh_api.h"
++    "${OPENSSH_SRC_DIR}/ttymodes.h"
++    "${OPENSSH_SRC_DIR}/uidswap.h"
++    "${OPENSSH_SRC_DIR}/umac.h"
++    "${OPENSSH_SRC_DIR}/version.h"
++    "${OPENSSH_SRC_DIR}/xmalloc.h")
++
++set(OPENSSH_SSH_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(ssh
++    ${OPENSSH_SSH_SOURCES}
++    ${OPENSSH_SSH_HEADERS}
++    ${OPENSSH_SSH_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT} /ignore:4098 /ignore:4099")
++endif()
++
++target_link_libraries(ssh ${OPENSSH_COMMON_LIBRARIES})
++
++# sshd
++
++set(OPENSSH_SSHD_SOURCES
++    "${OPENSSH_SRC_DIR}/audit-bsm.c"
++    "${OPENSSH_SRC_DIR}/audit-linux.c"
++    "${OPENSSH_SRC_DIR}/audit.c"
++    "${OPENSSH_SRC_DIR}/auth-bsdauth.c"
++    "${OPENSSH_SRC_DIR}/auth-krb5.c"
++    "${OPENSSH_SRC_DIR}/auth-options.c"
++    "${OPENSSH_SRC_DIR}/auth-pam.c"
++    "${OPENSSH_SRC_DIR}/auth-passwd.c"
++    "${OPENSSH_SRC_DIR}/auth-rhosts.c"
++    "${OPENSSH_SRC_DIR}/auth-shadow.c"
++    "${OPENSSH_SRC_DIR}/auth-sia.c"
++    "${OPENSSH_SRC_DIR}/auth.c"
++    "${OPENSSH_SRC_DIR}/auth2-chall.c"
++    "${OPENSSH_SRC_DIR}/auth2-gss.c"
++    "${OPENSSH_SRC_DIR}/auth2-hostbased.c"
++    "${OPENSSH_SRC_DIR}/auth2-kbdint.c"
++    "${OPENSSH_SRC_DIR}/auth2-none.c"
++    "${OPENSSH_SRC_DIR}/auth2-passwd.c"
++    "${OPENSSH_SRC_DIR}/auth2-pubkey.c"
++    "${OPENSSH_SRC_DIR}/auth2.c"
++    "${OPENSSH_SRC_DIR}/gss-serv-krb5.c"
++    "${OPENSSH_SRC_DIR}/gss-serv.c"
++    "${OPENSSH_SRC_DIR}/loginrec.c"
++    "${OPENSSH_SRC_DIR}/monitor.c"
++    "${OPENSSH_SRC_DIR}/monitor_wrap.c"
++    "${OPENSSH_SRC_DIR}/platform.c"
++    "${OPENSSH_SRC_DIR}/sandbox-capsicum.c"
++    "${OPENSSH_SRC_DIR}/sandbox-darwin.c"
++    "${OPENSSH_SRC_DIR}/sandbox-null.c"
++    "${OPENSSH_SRC_DIR}/sandbox-rlimit.c"
++    "${OPENSSH_SRC_DIR}/sandbox-seccomp-filter.c"
++    "${OPENSSH_SRC_DIR}/sandbox-systrace.c"
++    "${OPENSSH_SRC_DIR}/servconf.c"
++    "${OPENSSH_SRC_DIR}/serverloop.c"
++    "${OPENSSH_SRC_DIR}/session.c"
++    "${OPENSSH_SRC_DIR}/sftp-common.c"
++    "${OPENSSH_SRC_DIR}/sshd.c"
++    "${OPENSSH_SRC_DIR}/sshlogin.c"
++    "${OPENSSH_SRC_DIR}/srclimit.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSHD_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_groupaccess.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_sshpty.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_sshd.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32-doexec.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c")
++else()
++    list(APPEND OPENSSH_SSHD_SOURCES
++        "${OPENSSH_SRC_DIR}/sftp-realpath.c"
++        "${OPENSSH_SRC_DIR}/sftp-server.c"
++        "${OPENSSH_SRC_DIR}/groupaccess.c"
++        "${OPENSSH_SRC_DIR}/sshpty.c"
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SSHD_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(sshd
++    ${OPENSSH_SSHD_SOURCES}
++    ${OPENSSH_SSHD_RESOURCES})
++
++if(WIN32)
++    set_target_properties(sshd PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT} /ignore:4099")
++endif()
++
++target_link_libraries(sshd ${OPENSSH_COMMON_LIBRARIES})
++
++# scp
++
++set(OPENSSH_SCP_SOURCES
++    "${OPENSSH_SRC_DIR}/scp.c"
++    "${OPENSSH_SRC_DIR}/sftp-client.c"
++    "${OPENSSH_SRC_DIR}/sftp-common.c"
++    "${OPENSSH_SRC_DIR}/sftp-glob.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SCP_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c")
++else()
++    list(APPEND OPENSSH_SCP_SOURCES
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SCP_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(scp
++    ${OPENSSH_SCP_SOURCES}
++    ${OPENSSH_SCP_RESOURCES})
++
++if(WIN32)
++    set_target_properties(scp PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(scp ${OPENSSH_COMMON_LIBRARIES})
++
++# sftp
++
++set(OPENSSH_SFTP_SOURCES
++    "${OPENSSH_SRC_DIR}/progressmeter.c"
++    "${OPENSSH_SRC_DIR}/sftp-client.c"
++    "${OPENSSH_SRC_DIR}/sftp-common.c"
++    "${OPENSSH_SRC_DIR}/sftp-glob.c"
++    "${OPENSSH_SRC_DIR}/sftp.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SFTP_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c")
++else()
++    list(APPEND OPENSSH_SFTP_SOURCES
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SFTP_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(sftp
++    ${OPENSSH_SFTP_SOURCES}
++    ${OPENSSH_SFTP_RESOURCES})
++
++if(WIN32)
++    set_target_properties(sftp PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(sftp ${OPENSSH_COMMON_LIBRARIES})
++
++# sftp-server
++
++set(OPENSSH_SFTP_SERVER_SOURCES
++    "${OPENSSH_SRC_DIR}/sftp-common.c"
++    "${OPENSSH_SRC_DIR}/sftp-server-main.c"
++    "${OPENSSH_SRC_DIR}/sftp-server.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SFTP_SERVER_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++else()
++    list(APPEND OPENSSH_SFTP_SERVER_SOURCES
++        "${OPENSSH_SRC_DIR}/sftp-realpath.c"
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SFTP_SERVER_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(sftp-server
++    ${OPENSSH_SFTP_SERVER_SOURCES}
++    ${OPENSSH_SFTP_SERVER_RESOURCES})
++
++if(WIN32)
++    set_target_properties(sftp-server PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(sftp-server ${OPENSSH_COMMON_LIBRARIES})
++
++# ssh-add
++
++set(OPENSSH_SSH_ADD_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-add.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_ADD_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++else()
++    list(APPEND OPENSSH_SSH_ADD_SOURCES
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SSH_ADD_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(ssh-add
++    ${OPENSSH_SSH_ADD_SOURCES}
++    ${OPENSSH_SSH_ADD_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh-add PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(ssh-add ${OPENSSH_COMMON_LIBRARIES})
++
++# ssh-agent
++
++set(OPENSSH_SSH_AGENT_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-pkcs11-client.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_AGENT_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/ssh-agent/agent-main.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/ssh-agent/agent.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/ssh-agent/connection.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/ssh-agent/keyagent-request.c")
++else()
++    list(APPEND OPENSSH_SSH_AGENT_SOURCES
++        "${OPENSSH_SRC_DIR}/ssh-agent.c")
++endif()
++
++if(WIN32)
++    set(OPENSSH_SSH_AGENT_RESOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/openssh-events.rc"
++        "${OPENSSH_SRC_DIR}/contrib/win32/openssh/version.rc")
++endif()
++
++add_executable(ssh-agent
++    ${OPENSSH_SSH_AGENT_SOURCES}
++    ${OPENSSH_SSH_AGENT_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh-agent PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(ssh-agent ${OPENSSH_COMMON_LIBRARIES})
++
++# ssh-keygen
++
++set(OPENSSH_SSH_KEYGEN_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-keygen.c"
++    "${OPENSSH_SRC_DIR}/sshsig.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_KEYGEN_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++else()
++    list(APPEND OPENSSH_SSH_KEYGEN_SOURCES
++        "${OPENSSH_SRC_DIR}/utf8.c")
++endif()
++
++set(OPENSSH_SSH_KEYGEN_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(ssh-keygen
++    ${OPENSSH_SSH_KEYGEN_SOURCES}
++    ${OPENSSH_SSH_KEY_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh-keygen PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(ssh-keygen ${OPENSSH_COMMON_LIBRARIES})
++
++# ssh-keyscan
++
++set(OPENSSH_SSH_KEYSCAN_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-keyscan.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_KEYSCAN_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++endif()
++
++if(WIN32)
++    set(OPENSSH_SSH_KEYSCAN_RESOURCES
++        "${OPENSSH_TARGETOS_MANIFEST}"
++        "${OPENSSH_VERSION_RC}")
++endif()
++
++add_executable(ssh-keyscan
++    ${OPENSSH_SSH_KEYSCAN_SOURCES}
++    ${OPENSSH_SSH_KEYSCAN_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh-keyscan PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(ssh-keyscan ${OPENSSH_COMMON_LIBRARIES})
++
++# ssh-shellhost
++
++if(WIN32)
++    set(OPENSSH_SSH_SHELLHOST_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/utf.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/shell-host.c")
++
++    set(OPENSSH_SSH_SHELLHOST_RESOURCES
++        "${OPENSSH_TARGETOS_MANIFEST}"
++        "${OPENSSH_VERSION_RC}")
++
++    add_executable(ssh-shellhost
++        ${OPENSSH_SSH_SHELLHOST_SOURCES}
++        ${OPENSSH_SSH_SHELLHOST_RESOURCES})
++
++    set_target_properties(ssh-shellhost PROPERTIES LINK_FLAGS "${C_FLAGS_FORCE_MULTIPLE}")
++
++    target_link_libraries(ssh-shellhost ${OPENSSH_COMMON_LIBRARIES})
++endif()
++
++# ssh-sk-helper
++
++set(OPENSSH_SSH_SK_HELPER_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-sk-helper.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_SK_HELPER_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++endif()
++
++if(WIN32)
++    set(OPENSSH_SSH_SK_HELPER_RESOURCES
++        "${OPENSSH_TARGETOS_MANIFEST}"
++        "${OPENSSH_VERSION_RC}")
++endif()
++
++add_executable(ssh-sk-helper
++    ${OPENSSH_SSH_SK_HELPER_SOURCES}
++    ${OPENSSH_SSH_SK_HELPER_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh-sk-helper PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(ssh-sk-helper ${OPENSSH_COMMON_LIBRARIES})
++
++# ssh-pkcs11-helper
++
++set(OPENSSH_SSH_PKCS11_HELPER_SOURCES
++    "${OPENSSH_SRC_DIR}/ssh-pkcs11-helper.c"
++    "${OPENSSH_SRC_DIR}/ssh-pkcs11.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
++
++if(WIN32)
++    list(APPEND OPENSSH_SSH_PKCS11_HELPER_SOURCES
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++endif()
++
++if(WIN32)
++    set(OPENSSH_SSH_PKCS11_HELPER_RESOURCES
++        "${OPENSSH_TARGETOS_MANIFEST}"
++        "${OPENSSH_VERSION_RC}")
++endif()
++
++add_executable(ssh-pkcs11-helper
++    ${OPENSSH_SSH_PKCS11_HELPER_SOURCES}
++    ${OPENSSH_SSH_PKCS11_HELPER_RESOURCES})
++
++if(WIN32)
++    set_target_properties(ssh-pkcs11-helper PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++endif()
++
++target_link_libraries(ssh-pkcs11-helper ${OPENSSH_COMMON_LIBRARIES})
++
++# unit tests
++
++if(WITH_UNIT_TESTS)
++    enable_testing()
++    set(OPENSSH_TEST_TARGETS "")
++
++    # unit-test-bitmap
++    
++    set(OPENSSH_UNIT_TEST_BITMAP_SOURCES
++        "${OPENSSH_SRC_DIR}/regress/unittests/bitmap/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-bitmap ${OPENSSH_UNIT_TEST_BITMAP_SOURCES})
++    set_target_properties(unit-test-bitmap PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-bitmap ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-bitmap")
++
++    # unit-test-hostkeys
++
++    set(OPENSSH_UNIT_TEST_HOSTKEYS_SOURCES
++        "${OPENSSH_SRC_DIR}/ssh-sk-client.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/hostkeys/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/hostkeys/test_iterate.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-hostkeys ${OPENSSH_UNIT_TEST_HOSTKEYS_SOURCES})
++    set_target_properties(unit-test-hostkeys PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-hostkeys ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-hostkeys")
++
++    # unit-test-kex
++
++    set(OPENSSH_UNIT_TEST_KEX_SOURCES
++        "${OPENSSH_SRC_DIR}/ssh-sk-client.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/kex/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/kex/test_kex.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-kex ${OPENSSH_UNIT_TEST_KEX_SOURCES})
++    set_target_properties(unit-test-kex PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-kex ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-kex")
++
++    # unit-test-match
++
++    set(OPENSSH_UNIT_TEST_MATCH_SOURCES
++        "${OPENSSH_SRC_DIR}/regress/unittests/match/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-match ${OPENSSH_UNIT_TEST_MATCH_SOURCES})
++    set_target_properties(unit-test-match PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-match ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-match")
++
++    # unit-test-misc
++
++    set(OPENSSH_UNIT_TEST_MISC_SOURCES
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/test_parse.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/test_expand.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/test_convtime.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/test_argv.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/test_strdelim.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/misc/test_hpdelim.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-misc ${OPENSSH_UNIT_TEST_MISC_SOURCES})
++    set_target_properties(unit-test-misc PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-misc ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-misc")
++
++    # unit-test-sshbuf
++
++    set(OPENSSH_UNIT_TEST_SSHBUF_SOURCES
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf_fixed.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf_fuzz.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf_getput_basic.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf_getput_crypto.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf_getput_fuzz.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshbuf/test_sshbuf_misc.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/fuzz.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-sshbuf ${OPENSSH_UNIT_TEST_SSHBUF_SOURCES})
++    set_target_properties(unit-test-sshbuf PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-sshbuf ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-sshbuf")
++
++    # unit-test-sshkey
++
++    set(OPENSSH_UNIT_TEST_SSHKEY_SOURCES
++        "${OPENSSH_SRC_DIR}/ssh-sk-client.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshkey/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshkey/common.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshkey/test_file.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshkey/test_fuzz.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/sshkey/test_sshkey.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/fuzz.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-sshkey ${OPENSSH_UNIT_TEST_SSHKEY_SOURCES})
++    set_target_properties(unit-test-sshkey PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-sshkey ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-sshkey")
++
++    # unit-test-win32compat
++
++    set(OPENSSH_UNIT_TEST_WIN32COMPAT_SOURCES
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/file_tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/socket_tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/dir_tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/miscellaneous_tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/string_tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/win32compat/signal_tests.c"
++        "${OPENSSH_SRC_DIR}/regress/unittests/test_helper/test_helper.c"
++        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_common.c")
++
++    add_executable(unit-test-win32compat ${OPENSSH_UNIT_TEST_WIN32COMPAT_SOURCES})
++    set_target_properties(unit-test-win32compat PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT}")
++    target_link_libraries(unit-test-win32compat ${OPENSSH_COMMON_LIBRARIES})
++    list(APPEND OPENSSH_TEST_TARGETS "unit-test-win32compat")
++
++    # ctest targets
++
++    foreach(OPENSSH_TEST_TARGET ${OPENSSH_TEST_TARGETS})
++        add_test(NAME ${OPENSSH_TEST_TARGET} COMMAND ${OPENSSH_TEST_TARGET})
++    endforeach()
++endif()
++
++# installation
++
++set(OPENSSH_INSTALL_TARGETS
++    "ssh"
++    "sshd"
++    "scp"
++    "sftp"
++    "sftp-server"
++    "ssh-add"
++    "ssh-agent"
++    "ssh-keygen"
++    "ssh-keyscan"
++    "ssh-sk-helper"
++    "ssh-pkcs11-helper")
++
++if(WIN32)
++    list(APPEND OPENSSH_INSTALL_TARGETS "ssh-shellhost")
++endif()
++
++install(TARGETS ${OPENSSH_INSTALL_TARGETS}
++    ARCHIVE DESTINATION lib
++    LIBRARY DESTINATION lib
++    RUNTIME DESTINATION bin)
+diff --git a/cmake-config.h.in b/cmake-config.h.in
+new file mode 100644
+index 000000000..6e8bc4946
+--- /dev/null
++++ b/cmake-config.h.in
+@@ -0,0 +1,2107 @@
++/* config.h.in.  Generated from configure.ac by autoheader.  */
++
++/* Define if building universal (internal helper macro) */
++#cmakedefine AC_APPLE_UNIVERSAL_BUILD
++
++/* Define if you have a getaddrinfo that fails for the all-zeros IPv6 address
++   */
++#cmakedefine AIX_GETNAMEINFO_HACK
++
++/* Define if your AIX loginfailed() function takes 4 arguments (AIX >= 5.2) */
++#cmakedefine AIX_LOGINFAILED_4ARG
++
++/* System only supports IPv4 audit records */
++#cmakedefine AU_IPv4
++
++/* Define if your resolver libs need this for getrrsetbyname */
++#cmakedefine BIND_8_COMPAT
++
++/* The system has incomplete BSM API */
++#cmakedefine BROKEN_BSM_API
++
++/* broken in chroots on older kernels */
++#cmakedefine01 BROKEN_CLOSEFROM
++
++/* Define if cmsg_type is not passed correctly */
++#cmakedefine BROKEN_CMSG_TYPE
++
++/* getaddrinfo is broken (if present) */
++#cmakedefine BROKEN_GETADDRINFO
++
++/* getgroups(0,NULL) will return -1 */
++#cmakedefine BROKEN_GETGROUPS
++
++/* getline is not what we expect */
++#cmakedefine BROKEN_GETLINE
++
++/* FreeBSD glob does not do what we need */
++#cmakedefine BROKEN_GLOB
++
++/* Define if you system's inet_ntoa is busted (e.g. Irix gcc issue) */
++#cmakedefine BROKEN_INET_NTOA
++
++/* Define if your struct dirent expects you to allocate extra space for d_name
++   */
++#cmakedefine BROKEN_ONE_BYTE_DIRENT_D_NAME
++
++/* System poll(2) implementation is broken */
++#cmakedefine BROKEN_POLL
++
++/* Can't do comparisons on readv */
++#cmakedefine BROKEN_READV_COMPARISON
++
++/* NetBSD read function is sometimes redirected, breaking atomicio comparisons
++   against it */
++#cmakedefine BROKEN_READ_COMPARISON
++
++/* Needed for NeXT */
++#cmakedefine BROKEN_SAVED_UIDS
++
++/* Define if your setregid() is broken */
++#cmakedefine BROKEN_SETREGID
++
++/* Define if your setresgid() is broken */
++#cmakedefine BROKEN_SETRESGID
++
++/* Define if your setresuid() is broken */
++#cmakedefine BROKEN_SETRESUID
++
++/* Define if your setreuid() is broken */
++#cmakedefine BROKEN_SETREUID
++
++/* LynxOS has broken setvbuf() implementation */
++#cmakedefine BROKEN_SETVBUF
++
++/* QNX shadow support is broken */
++#cmakedefine BROKEN_SHADOW_EXPIRE
++
++/* Define if your snprintf is busted */
++#cmakedefine BROKEN_SNPRINTF
++
++/* strndup broken, see APAR IY61211 */
++#cmakedefine BROKEN_STRNDUP
++
++/* strnlen broken, see APAR IY62551 */
++#cmakedefine BROKEN_STRNLEN
++
++/* strnvis detected broken */
++#cmakedefine01 BROKEN_STRNVIS
++
++/* tcgetattr with ICANON may hang */
++#cmakedefine BROKEN_TCGETATTR_ICANON
++
++/* updwtmpx is broken (if present) */
++#cmakedefine BROKEN_UPDWTMPX
++
++/* Define if you have BSD auth support */
++#cmakedefine BSD_AUTH
++
++/* Define if you want to specify the path to your lastlog file */
++#cmakedefine CONF_LASTLOG_FILE
++
++/* Define if you want to specify the path to your utmp file */
++#cmakedefine CONF_UTMP_FILE
++
++/* Define if you want to specify the path to your wtmpx file */
++#cmakedefine CONF_WTMPX_FILE
++
++/* Define if you want to specify the path to your wtmp file */
++#cmakedefine CONF_WTMP_FILE
++
++/* Need to call setpgrp as root */
++#cmakedefine DISABLE_FD_PASSING
++
++/* Define if you don't want to use lastlog */
++#cmakedefine DISABLE_LASTLOG
++
++/* Define if you don't want to use your system's login() call */
++#cmakedefine DISABLE_LOGIN
++
++/* Define if you don't want to use pututline() etc. to write [uw]tmp */
++#cmakedefine DISABLE_PUTUTLINE
++
++/* Define if you don't want to use pututxline() etc. to write [uw]tmpx */
++#cmakedefine DISABLE_PUTUTXLINE
++
++/* Define if you want to disable shadow passwords */
++#cmakedefine DISABLE_SHADOW
++
++/* Define if you don't want to use utmp */
++#cmakedefine DISABLE_UTMP
++
++/* Define if you don't want to use utmpx */
++#cmakedefine DISABLE_UTMPX
++
++/* Define if you don't want to use wtmp */
++#cmakedefine DISABLE_WTMP
++
++/* Define if you don't want to use wtmpx */
++#cmakedefine01 DISABLE_WTMPX
++
++/* Enable for PKCS#11 support */
++#cmakedefine ENABLE_PKCS11 "@ENABLE_PKCS11@"
++
++/* Enable for U2F/FIDO support */
++#cmakedefine ENABLE_SK "@ENABLE_SK@"
++
++/* Enable for built-in U2F/FIDO support */
++#cmakedefine ENABLE_SK_INTERNAL
++
++/* define if fflush(NULL) does not work */
++#cmakedefine FFLUSH_NULL_BUG
++
++/* File names may not contain backslash characters */
++#cmakedefine FILESYSTEM_NO_BACKSLASH
++
++/* fsid_t has member val */
++#cmakedefine FSID_HAS_VAL
++
++/* fsid_t has member __val */
++#cmakedefine FSID_HAS___VAL
++
++/* getpgrp takes one arg */
++#cmakedefine01 GETPGRP_VOID
++
++/* Conflicting defs for getspnam */
++#cmakedefine GETSPNAM_CONFLICTING_DEFS
++
++/* Define if your system glob() function has the GLOB_ALTDIRFUNC extension */
++#cmakedefine01 GLOB_HAS_ALTDIRFUNC
++
++/* Define if your system glob() function has gl_matchc options in glob_t */
++#cmakedefine GLOB_HAS_GL_MATCHC
++
++/* Define if your system glob() function has gl_statv options in glob_t */
++#cmakedefine GLOB_HAS_GL_STATV
++
++/* Define this if you want GSSAPI support in the version 2 protocol */
++#cmakedefine GSSAPI
++
++/* Define if you want to use shadow password expire field */
++#cmakedefine01 HAS_SHADOW_EXPIRE
++
++/* Define if your system uses access rights style file descriptor passing */
++#cmakedefine HAVE_ACCRIGHTS_IN_MSGHDR
++
++/* Define if you have ut_addr in utmp.h */
++#cmakedefine HAVE_ADDR_IN_UTMP
++
++/* Define if you have ut_addr in utmpx.h */
++#cmakedefine HAVE_ADDR_IN_UTMPX
++
++/* Define if you have ut_addr_v6 in utmp.h */
++#cmakedefine HAVE_ADDR_V6_IN_UTMP
++
++/* Define if you have ut_addr_v6 in utmpx.h */
++#cmakedefine HAVE_ADDR_V6_IN_UTMPX
++
++/* Define to 1 if you have the `arc4random' function. */
++#cmakedefine HAVE_ARC4RANDOM
++
++/* Define to 1 if you have the `arc4random_buf' function. */
++#cmakedefine HAVE_ARC4RANDOM_BUF
++
++/* Define to 1 if you have the `arc4random_stir' function. */
++#cmakedefine HAVE_ARC4RANDOM_STIR
++
++/* Define to 1 if you have the `arc4random_uniform' function. */
++#cmakedefine HAVE_ARC4RANDOM_UNIFORM
++
++/* Define to 1 if libcrypto exports arc4random functions. */
++#cmakedefine HAVE_ARC4RANDOM_LIBCRYPTO
++
++/* Define to 1 if you have the `asprintf' function. */
++#cmakedefine01 HAVE_ASPRINTF
++
++/* OpenBSD's gcc has bounded */
++#cmakedefine HAVE_ATTRIBUTE__BOUNDED__
++
++/* Have attribute nonnull */
++#cmakedefine01 HAVE_ATTRIBUTE__NONNULL__
++
++/* OpenBSD's gcc has sentinel */
++#cmakedefine HAVE_ATTRIBUTE__SENTINEL__
++
++/* Define to 1 if you have the `aug_get_machine' function. */
++#cmakedefine HAVE_AUG_GET_MACHINE
++
++/* Define to 1 if you have the `b64_ntop' function. */
++#cmakedefine HAVE_B64_NTOP
++
++/* Define to 1 if you have the `b64_pton' function. */
++#cmakedefine HAVE_B64_PTON
++
++/* Define if you have the basename function. */
++#cmakedefine01 HAVE_BASENAME
++
++/* Define to 1 if you have the `bcopy' function. */
++#cmakedefine01 HAVE_BCOPY
++
++/* Define to 1 if you have the `bcrypt_pbkdf' function. */
++#cmakedefine HAVE_BCRYPT_PBKDF
++
++/* Define to 1 if you have the `bindresvport_sa' function. */
++#cmakedefine HAVE_BINDRESVPORT_SA
++
++/* Define to 1 if you have the `blf_enc' function. */
++#cmakedefine HAVE_BLF_ENC
++
++/* Define to 1 if you have the <blf.h> header file. */
++#cmakedefine HAVE_BLF_H
++
++/* Define to 1 if you have the `Blowfish_expand0state' function. */
++#cmakedefine HAVE_BLOWFISH_EXPAND0STATE
++
++/* Define to 1 if you have the `Blowfish_expandstate' function. */
++#cmakedefine HAVE_BLOWFISH_EXPANDSTATE
++
++/* Define to 1 if you have the `Blowfish_initstate' function. */
++#cmakedefine HAVE_BLOWFISH_INITSTATE
++
++/* Define to 1 if you have the `Blowfish_stream2word' function. */
++#cmakedefine HAVE_BLOWFISH_STREAM2WORD
++
++/* Define to 1 if you have the `BN_is_prime_ex' function. */
++#cmakedefine01 HAVE_BN_IS_PRIME_EX
++
++/* Define to 1 if you have the <bsd/libutil.h> header file. */
++#cmakedefine HAVE_BSD_LIBUTIL_H
++
++/* Define to 1 if you have the <bsm/audit.h> header file. */
++#cmakedefine HAVE_BSM_AUDIT_H
++
++/* Define to 1 if you have the <bstring.h> header file. */
++#cmakedefine HAVE_BSTRING_H
++
++/* Define to 1 if you have the `bzero' function. */
++#cmakedefine01 HAVE_BZERO
++
++/* calloc(0, x) returns NULL */
++#cmakedefine01 HAVE_CALLOC
++
++/* Define to 1 if you have the `cap_rights_limit' function. */
++#cmakedefine HAVE_CAP_RIGHTS_LIMIT
++
++/* Define to 1 if you have the `clock' function. */
++#cmakedefine HAVE_CLOCK
++
++/* Have clock_gettime */
++#cmakedefine01 HAVE_CLOCK_GETTIME
++
++/* define if you have clock_t data type */
++#cmakedefine01 HAVE_CLOCK_T
++
++/* Define to 1 if you have the `closefrom' function. */
++#cmakedefine HAVE_CLOSEFROM
++
++/* Define to 1 if you have the `close_range' function. */
++#cmakedefine HAVE_CLOSE_RANGE
++
++/* Define if gai_strerror() returns const char * */
++#cmakedefine01 HAVE_CONST_GAI_STRERROR_PROTO
++
++/* Define if your system uses ancillary data style file descriptor passing */
++#cmakedefine01 HAVE_CONTROL_IN_MSGHDR
++
++/* Define to 1 if you have the `crypt' function. */
++#cmakedefine01 HAVE_CRYPT
++
++/* Define to 1 if you have the <crypto/sha2.h> header file. */
++#cmakedefine HAVE_CRYPTO_SHA2_H
++
++/* Define to 1 if you have the <crypt.h> header file. */
++#cmakedefine HAVE_CRYPT_H
++
++/* Define if you are on Cygwin */
++#cmakedefine HAVE_CYGWIN
++
++/* Define if your libraries define daemon() */
++#cmakedefine01 HAVE_DAEMON
++
++/* Define to 1 if you have the declaration of `AI_NUMERICSERV', and to 0 if
++   you don't. */
++#cmakedefine01 HAVE_DECL_AI_NUMERICSERV
++
++/* Define to 1 if you have the declaration of `authenticate', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_AUTHENTICATE
++
++/* Define to 1 if you have the declaration of `bzero', and to 0 if you don't.
++   */
++#cmakedefine01 HAVE_DECL_BZERO
++
++/* Define to 1 if you have the declaration of `getpeereid', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_GETPEEREID
++
++/* Define to 1 if you have the declaration of `GLOB_NOMATCH', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_GLOB_NOMATCH
++
++/* Define to 1 if you have the declaration of `GSS_C_NT_HOSTBASED_SERVICE',
++   and to 0 if you don't. */
++#cmakedefine01 HAVE_DECL_GSS_C_NT_HOSTBASED_SERVICE
++
++/* Define to 1 if you have the declaration of `howmany', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_HOWMANY
++
++/* Define to 1 if you have the declaration of `h_errno', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_H_ERRNO
++
++/* Define to 1 if you have the declaration of `loginfailed', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_LOGINFAILED
++
++/* Define to 1 if you have the declaration of `loginrestrictions', and to 0 if
++   you don't. */
++#cmakedefine01 HAVE_DECL_LOGINRESTRICTIONS
++
++/* Define to 1 if you have the declaration of `loginsuccess', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_LOGINSUCCESS
++
++/* Define to 1 if you have the declaration of `MAXSYMLINKS', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_MAXSYMLINKS
++
++/* Define to 1 if you have the declaration of `memmem', and to 0 if you don't.
++   */
++#cmakedefine01 HAVE_DECL_MEMMEM
++
++/* Define to 1 if you have the declaration of `NFDBITS', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_NFDBITS
++
++/* Define to 1 if you have the declaration of `offsetof', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_OFFSETOF
++
++/* Define to 1 if you have the declaration of `O_NONBLOCK', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_O_NONBLOCK
++
++/* Define to 1 if you have the declaration of `passwdexpired', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_PASSWDEXPIRED
++
++/* Define to 1 if you have the declaration of `readv', and to 0 if you don't.
++   */
++#cmakedefine01 HAVE_DECL_READV
++
++/* Define to 1 if you have the declaration of `setauthdb', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_SETAUTHDB
++
++/* Define to 1 if you have the declaration of `SHUT_RD', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_SHUT_RD
++
++/* Define to 1 if you have the declaration of `UINT32_MAX', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL_UINT32_MAX
++
++/* Define to 1 if you have the declaration of `writev', and to 0 if you don't.
++   */
++#cmakedefine01 HAVE_DECL_WRITEV
++
++/* Define to 1 if you have the declaration of `_getlong', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL__GETLONG
++
++/* Define to 1 if you have the declaration of `_getshort', and to 0 if you
++   don't. */
++#cmakedefine01 HAVE_DECL__GETSHORT
++
++/* Define to 1 if you have the `DES_crypt' function. */
++#cmakedefine HAVE_DES_CRYPT
++
++/* Define if you have /dev/ptmx */
++#cmakedefine HAVE_DEV_PTMX
++
++/* Define if you have /dev/ptc */
++#cmakedefine HAVE_DEV_PTS_AND_PTC
++
++/* Define to 1 if you have the `DH_get0_key' function. */
++#cmakedefine HAVE_DH_GET0_KEY
++
++/* Define to 1 if you have the `DH_get0_pqg' function. */
++#cmakedefine HAVE_DH_GET0_PQG
++
++/* Define to 1 if you have the `DH_set0_key' function. */
++#cmakedefine HAVE_DH_SET0_KEY
++
++/* Define to 1 if you have the `DH_set0_pqg' function. */
++#cmakedefine HAVE_DH_SET0_PQG
++
++/* Define to 1 if you have the `DH_set_length' function. */
++#cmakedefine HAVE_DH_SET_LENGTH
++
++/* Define to 1 if you have the <dirent.h> header file. */
++#cmakedefine HAVE_DIRENT_H
++
++/* Define to 1 if you have the `dirfd' function. */
++#cmakedefine HAVE_DIRFD
++
++/* Define to 1 if you have the `dirname' function. */
++#cmakedefine HAVE_DIRNAME
++
++/* Define to 1 if you have the `dlopen' function. */
++#cmakedefine HAVE_DLOPEN
++
++/* Define to 1 if you have the `DSA_generate_parameters_ex' function. */
++#cmakedefine HAVE_DSA_GENERATE_PARAMETERS_EX
++
++/* Define to 1 if you have the `DSA_get0_key' function. */
++#cmakedefine HAVE_DSA_GET0_KEY
++
++/* Define to 1 if you have the `DSA_get0_pqg' function. */
++#cmakedefine HAVE_DSA_GET0_PQG
++
++/* Define to 1 if you have the `DSA_set0_key' function. */
++#cmakedefine HAVE_DSA_SET0_KEY
++
++/* Define to 1 if you have the `DSA_set0_pqg' function. */
++#cmakedefine HAVE_DSA_SET0_PQG
++
++/* Define to 1 if you have the `DSA_SIG_get0' function. */
++#cmakedefine HAVE_DSA_SIG_GET0
++
++/* Define to 1 if you have the `DSA_SIG_set0' function. */
++#cmakedefine HAVE_DSA_SIG_SET0
++
++/* Define to 1 if you have the `ECDSA_SIG_get0' function. */
++#cmakedefine HAVE_ECDSA_SIG_GET0
++
++/* Define to 1 if you have the `ECDSA_SIG_set0' function. */
++#cmakedefine HAVE_ECDSA_SIG_SET0
++
++/* Define to 1 if you have the `EC_KEY_METHOD_new' function. */
++#cmakedefine HAVE_EC_KEY_METHOD_NEW
++
++/* Define to 1 if you have the <elf.h> header file. */
++#cmakedefine HAVE_ELF_H
++
++/* Define to 1 if you have the `endgrent' function. */
++#cmakedefine HAVE_ENDGRENT
++
++/* Define to 1 if you have the <endian.h> header file. */
++#cmakedefine HAVE_ENDIAN_H
++
++/* Define to 1 if you have the `endutent' function. */
++#cmakedefine HAVE_ENDUTENT
++
++/* Define to 1 if you have the `endutxent' function. */
++#cmakedefine HAVE_ENDUTXENT
++
++/* Define to 1 if you have the `err' function. */
++#cmakedefine HAVE_ERR
++
++/* Define to 1 if you have the `errx' function. */
++#cmakedefine HAVE_ERRX
++
++/* Define to 1 if you have the <err.h> header file. */
++#cmakedefine HAVE_ERR_H
++
++/* Define if your system has /etc/default/login */
++#cmakedefine HAVE_ETC_DEFAULT_LOGIN
++
++/* Define to 1 if you have the `EVP_chacha20' function. */
++#cmakedefine HAVE_EVP_CHACHA20
++
++/* Define to 1 if you have the `EVP_CIPHER_CTX_ctrl' function. */
++#cmakedefine HAVE_EVP_CIPHER_CTX_CTRL
++
++/* Define to 1 if you have the `EVP_CIPHER_CTX_get_iv' function. */
++#cmakedefine HAVE_EVP_CIPHER_CTX_GET_IV
++
++/* Define to 1 if you have the `EVP_CIPHER_CTX_get_updated_iv' function. */
++#cmakedefine HAVE_EVP_CIPHER_CTX_GET_UPDATED_IV
++
++/* Define to 1 if you have the `EVP_CIPHER_CTX_iv' function. */
++#cmakedefine HAVE_EVP_CIPHER_CTX_IV
++
++/* Define to 1 if you have the `EVP_CIPHER_CTX_iv_noconst' function. */
++#cmakedefine HAVE_EVP_CIPHER_CTX_IV_NOCONST
++
++/* Define to 1 if you have the `EVP_CIPHER_CTX_set_iv' function. */
++#cmakedefine HAVE_EVP_CIPHER_CTX_SET_IV
++
++/* Define to 1 if you have the `EVP_DigestFinal_ex' function. */
++#cmakedefine HAVE_EVP_DIGESTFINAL_EX
++
++/* Define to 1 if you have the `EVP_DigestInit_ex' function. */
++#cmakedefine HAVE_EVP_DIGESTINIT_EX
++
++/* Define to 1 if you have the `EVP_MD_CTX_cleanup' function. */
++#cmakedefine HAVE_EVP_MD_CTX_CLEANUP
++
++/* Define to 1 if you have the `EVP_MD_CTX_copy_ex' function. */
++#cmakedefine HAVE_EVP_MD_CTX_COPY_EX
++
++/* Define to 1 if you have the `EVP_MD_CTX_free' function. */
++#cmakedefine HAVE_EVP_MD_CTX_FREE
++
++/* Define to 1 if you have the `EVP_MD_CTX_init' function. */
++#cmakedefine HAVE_EVP_MD_CTX_INIT
++
++/* Define to 1 if you have the `EVP_MD_CTX_new' function. */
++#cmakedefine HAVE_EVP_MD_CTX_NEW
++
++/* Define to 1 if you have the `EVP_PKEY_get0_RSA' function. */
++#cmakedefine HAVE_EVP_PKEY_GET0_RSA
++
++/* Define to 1 if you have the `EVP_sha256' function. */
++#cmakedefine HAVE_EVP_SHA256
++
++/* Define to 1 if you have the `EVP_sha384' function. */
++#cmakedefine HAVE_EVP_SHA384
++
++/* Define to 1 if you have the `EVP_sha512' function. */
++#cmakedefine HAVE_EVP_SHA512
++
++/* Define if you have ut_exit in utmp.h */
++#cmakedefine HAVE_EXIT_IN_UTMP
++
++/* Define to 1 if you have the `explicit_bzero' function. */
++#cmakedefine HAVE_EXPLICIT_BZERO
++
++/* Define to 1 if you have the `explicit_memset' function. */
++#cmakedefine HAVE_EXPLICIT_MEMSET
++
++/* Define to 1 if you have the `fchmod' function. */
++#cmakedefine HAVE_FCHMOD
++
++/* Define to 1 if you have the `fchmodat' function. */
++#cmakedefine HAVE_FCHMODAT
++
++/* Define to 1 if you have the `fchown' function. */
++#cmakedefine HAVE_FCHOWN
++
++/* Define to 1 if you have the `fchownat' function. */
++#cmakedefine HAVE_FCHOWNAT
++
++/* Use F_CLOSEM fcntl for closefrom */
++#cmakedefine HAVE_FCNTL_CLOSEM
++
++/* Define to 1 if you have the <fcntl.h> header file. */
++#cmakedefine HAVE_FCNTL_H
++
++/* Define to 1 if the system has the type `fd_mask'. */
++#cmakedefine HAVE_FD_MASK
++
++/* Define to 1 if you have the <features.h> header file. */
++#cmakedefine HAVE_FEATURES_H
++
++/* Define to 1 if you have the `fido_assert_set_clientdata' function. */
++#cmakedefine HAVE_FIDO_ASSERT_SET_CLIENTDATA
++
++/* Define to 1 if you have the `fido_cred_prot' function. */
++#cmakedefine HAVE_FIDO_CRED_PROT
++
++/* Define to 1 if you have the `fido_cred_set_clientdata' function. */
++#cmakedefine HAVE_FIDO_CRED_SET_CLIENTDATA
++
++/* Define to 1 if you have the `fido_cred_set_prot' function. */
++#cmakedefine HAVE_FIDO_CRED_SET_PROT
++
++/* Define to 1 if you have the `fido_dev_get_touch_begin' function. */
++#cmakedefine HAVE_FIDO_DEV_GET_TOUCH_BEGIN
++
++/* Define to 1 if you have the `fido_dev_get_touch_status' function. */
++#cmakedefine HAVE_FIDO_DEV_GET_TOUCH_STATUS
++
++/* Define to 1 if you have the `fido_dev_supports_cred_prot' function. */
++#cmakedefine HAVE_FIDO_DEV_SUPPORTS_CRED_PROT
++
++/* Define to 1 if you have the <floatingpoint.h> header file. */
++#cmakedefine HAVE_FLOATINGPOINT_H
++
++/* Define to 1 if you have the `flock' function. */
++#cmakedefine HAVE_FLOCK
++
++/* Define to 1 if you have the `fmt_scaled' function. */
++#cmakedefine HAVE_FMT_SCALED
++
++/* Define to 1 if you have the `fnmatch' function. */
++#cmakedefine HAVE_FNMATCH
++
++/* Define to 1 if you have the <fnmatch.h> header file. */
++#cmakedefine HAVE_FNMATCH_H
++
++/* Define to 1 if you have the `freeaddrinfo' function. */
++#cmakedefine HAVE_FREEADDRINFO
++
++/* Define to 1 if you have the `freezero' function. */
++#cmakedefine HAVE_FREEZERO
++
++/* Define to 1 if the system has the type `fsblkcnt_t'. */
++#cmakedefine HAVE_FSBLKCNT_T
++
++/* Define to 1 if the system has the type `fsfilcnt_t'. */
++#cmakedefine HAVE_FSFILCNT_T
++
++/* Define to 1 if you have the `fstatfs' function. */
++#cmakedefine HAVE_FSTATFS
++
++/* Define to 1 if you have the `fstatvfs' function. */
++#cmakedefine HAVE_FSTATVFS
++
++/* Define to 1 if you have the `futimes' function. */
++#cmakedefine HAVE_FUTIMES
++
++/* Define to 1 if you have the `gai_strerror' function. */
++#cmakedefine HAVE_GAI_STRERROR
++
++/* Define to 1 if you have the `getaddrinfo' function. */
++#cmakedefine HAVE_GETADDRINFO
++
++/* Define to 1 if you have the `getaudit' function. */
++#cmakedefine HAVE_GETAUDIT
++
++/* Define to 1 if you have the `getaudit_addr' function. */
++#cmakedefine HAVE_GETAUDIT_ADDR
++
++/* Define to 1 if you have the `getcwd' function. */
++#cmakedefine HAVE_GETCWD
++
++/* Define to 1 if you have the `getgrouplist' function. */
++#cmakedefine HAVE_GETGROUPLIST
++
++/* Define to 1 if you have the `getgrset' function. */
++#cmakedefine HAVE_GETGRSET
++
++/* Define to 1 if you have the `getlastlogxbyname' function. */
++#cmakedefine HAVE_GETLASTLOGXBYNAME
++
++/* Define to 1 if you have the `getline' function. */
++#cmakedefine HAVE_GETLINE
++
++/* Define to 1 if you have the `getluid' function. */
++#cmakedefine HAVE_GETLUID
++
++/* Define to 1 if you have the `getnameinfo' function. */
++#cmakedefine HAVE_GETNAMEINFO
++
++/* Define to 1 if you have the `getopt' function. */
++#cmakedefine HAVE_GETOPT
++
++/* Define to 1 if you have the <getopt.h> header file. */
++#cmakedefine HAVE_GETOPT_H
++
++/* Define if your getopt(3) defines and uses optreset */
++#cmakedefine HAVE_GETOPT_OPTRESET
++
++/* Define if your libraries define getpagesize() */
++#cmakedefine HAVE_GETPAGESIZE
++
++/* Define to 1 if you have the `getpeereid' function. */
++#cmakedefine HAVE_GETPEEREID
++
++/* Define to 1 if you have the `getpeerucred' function. */
++#cmakedefine HAVE_GETPEERUCRED
++
++/* Define to 1 if you have the `getpgid' function. */
++#cmakedefine HAVE_GETPGID
++
++/* Define to 1 if you have the `getpgrp' function. */
++#cmakedefine HAVE_GETPGRP
++
++/* Define to 1 if you have the `getpwanam' function. */
++#cmakedefine HAVE_GETPWANAM
++
++/* Define to 1 if you have the `getrandom' function. */
++#cmakedefine HAVE_GETRANDOM
++
++/* Define to 1 if you have the `getrlimit' function. */
++#cmakedefine HAVE_GETRLIMIT
++
++/* Define if getrrsetbyname() exists */
++#cmakedefine HAVE_GETRRSETBYNAME
++
++/* Define to 1 if you have the `getseuserbyname' function. */
++#cmakedefine HAVE_GETSEUSERBYNAME
++
++/* Define to 1 if you have the `getsid' function. */
++#cmakedefine HAVE_GETSID
++
++/* Define to 1 if you have the `gettimeofday' function. */
++#cmakedefine HAVE_GETTIMEOFDAY
++
++/* Define to 1 if you have the `getttyent' function. */
++#cmakedefine HAVE_GETTTYENT
++
++/* Define to 1 if you have the `getutent' function. */
++#cmakedefine HAVE_GETUTENT
++
++/* Define to 1 if you have the `getutid' function. */
++#cmakedefine HAVE_GETUTID
++
++/* Define to 1 if you have the `getutline' function. */
++#cmakedefine HAVE_GETUTLINE
++
++/* Define to 1 if you have the `getutxent' function. */
++#cmakedefine HAVE_GETUTXENT
++
++/* Define to 1 if you have the `getutxid' function. */
++#cmakedefine HAVE_GETUTXID
++
++/* Define to 1 if you have the `getutxline' function. */
++#cmakedefine HAVE_GETUTXLINE
++
++/* Define to 1 if you have the `getutxuser' function. */
++#cmakedefine HAVE_GETUTXUSER
++
++/* Define to 1 if you have the `get_default_context_with_level' function. */
++#cmakedefine HAVE_GET_DEFAULT_CONTEXT_WITH_LEVEL
++
++/* Define to 1 if you have the `glob' function. */
++#cmakedefine HAVE_GLOB
++
++/* Define to 1 if you have the <glob.h> header file. */
++#cmakedefine HAVE_GLOB_H
++
++/* Define to 1 if you have the `group_from_gid' function. */
++#cmakedefine HAVE_GROUP_FROM_GID
++
++/* Define to 1 if you have the <gssapi_generic.h> header file. */
++#cmakedefine HAVE_GSSAPI_GENERIC_H
++
++/* Define to 1 if you have the <gssapi/gssapi_generic.h> header file. */
++#cmakedefine HAVE_GSSAPI_GSSAPI_GENERIC_H
++
++/* Define to 1 if you have the <gssapi/gssapi.h> header file. */
++#cmakedefine HAVE_GSSAPI_GSSAPI_H
++
++/* Define to 1 if you have the <gssapi/gssapi_krb5.h> header file. */
++#cmakedefine HAVE_GSSAPI_GSSAPI_KRB5_H
++
++/* Define to 1 if you have the <gssapi.h> header file. */
++#cmakedefine HAVE_GSSAPI_H
++
++/* Define to 1 if you have the <gssapi_krb5.h> header file. */
++#cmakedefine HAVE_GSSAPI_KRB5_H
++
++/* Define if HEADER.ad exists in arpa/nameser.h */
++#cmakedefine HAVE_HEADER_AD
++
++/* Define to 1 if you have the `HMAC_CTX_init' function. */
++#cmakedefine HAVE_HMAC_CTX_INIT
++
++/* Define if you have ut_host in utmp.h */
++#cmakedefine HAVE_HOST_IN_UTMP
++
++/* Define if you have ut_host in utmpx.h */
++#cmakedefine HAVE_HOST_IN_UTMPX
++
++/* Define to 1 if you have the <iaf.h> header file. */
++#cmakedefine HAVE_IAF_H
++
++/* Define to 1 if you have the <ia.h> header file. */
++#cmakedefine HAVE_IA_H
++
++/* Define if you have ut_id in utmp.h */
++#cmakedefine HAVE_ID_IN_UTMP
++
++/* Define if you have ut_id in utmpx.h */
++#cmakedefine HAVE_ID_IN_UTMPX
++
++/* Define to 1 if you have the <ifaddrs.h> header file. */
++#cmakedefine HAVE_IFADDRS_H
++
++/* Define to 1 if you have the `inet_aton' function. */
++#cmakedefine HAVE_INET_ATON
++
++/* Define to 1 if you have the `inet_ntoa' function. */
++#cmakedefine HAVE_INET_NTOA
++
++/* Define to 1 if you have the `inet_ntop' function. */
++#cmakedefine HAVE_INET_NTOP
++
++/* Define to 1 if you have the `innetgr' function. */
++#cmakedefine HAVE_INNETGR
++
++/* define if you have int64_t data type */
++#cmakedefine HAVE_INT64_T
++
++/* Define to 1 if the system has the type `intmax_t'. */
++#cmakedefine HAVE_INTMAX_T
++
++/* Define to 1 if you have the <inttypes.h> header file. */
++#cmakedefine HAVE_INTTYPES_H
++
++/* define if you have intxx_t data type */
++#cmakedefine HAVE_INTXX_T
++
++/* Define to 1 if the system has the type `in_addr_t'. */
++#cmakedefine HAVE_IN_ADDR_T
++
++/* Define to 1 if the system has the type `in_port_t'. */
++#cmakedefine HAVE_IN_PORT_T
++
++/* Define if you have isblank(3C). */
++#cmakedefine HAVE_ISBLANK
++
++/* Define to 1 if you have the `krb5_cc_new_unique' function. */
++#cmakedefine HAVE_KRB5_CC_NEW_UNIQUE
++
++/* Define to 1 if you have the `krb5_free_error_message' function. */
++#cmakedefine HAVE_KRB5_FREE_ERROR_MESSAGE
++
++/* Define to 1 if you have the `krb5_get_error_message' function. */
++#cmakedefine HAVE_KRB5_GET_ERROR_MESSAGE
++
++/* Define to 1 if you have the <langinfo.h> header file. */
++#cmakedefine HAVE_LANGINFO_H
++
++/* Define to 1 if you have the <lastlog.h> header file. */
++#cmakedefine HAVE_LASTLOG_H
++
++/* Define if you want ldns support */
++#cmakedefine HAVE_LDNS
++
++/* Define to 1 if you have the <libaudit.h> header file. */
++#cmakedefine HAVE_LIBAUDIT_H
++
++/* Define to 1 if you have the `bsm' library (-lbsm). */
++#cmakedefine HAVE_LIBBSM
++
++/* Define to 1 if you have the `crypt' library (-lcrypt). */
++#cmakedefine HAVE_LIBCRYPT
++
++/* Define to 1 if you have the `dl' library (-ldl). */
++#cmakedefine HAVE_LIBDL
++
++/* Define to 1 if you have the <libgen.h> header file. */
++#cmakedefine HAVE_LIBGEN_H
++
++/* Define if system has libiaf that supports set_id */
++#cmakedefine HAVE_LIBIAF
++
++/* Define to 1 if you have the `network' library (-lnetwork). */
++#cmakedefine HAVE_LIBNETWORK
++
++/* Define to 1 if you have the `pam' library (-lpam). */
++#cmakedefine HAVE_LIBPAM
++
++/* Define to 1 if you have the <libproc.h> header file. */
++#cmakedefine HAVE_LIBPROC_H
++
++/* Define to 1 if you have the `socket' library (-lsocket). */
++#cmakedefine HAVE_LIBSOCKET
++
++/* Define to 1 if you have the <libutil.h> header file. */
++#cmakedefine HAVE_LIBUTIL_H
++
++/* Define to 1 if you have the `xnet' library (-lxnet). */
++#cmakedefine HAVE_LIBXNET
++
++/* Define to 1 if you have the `z' library (-lz). */
++#cmakedefine HAVE_LIBZ
++
++/* Define to 1 if you have the <limits.h> header file. */
++#cmakedefine HAVE_LIMITS_H
++
++/* Define to 1 if you have the <linux/audit.h> header file. */
++#cmakedefine HAVE_LINUX_AUDIT_H
++
++/* Define to 1 if you have the <linux/filter.h> header file. */
++#cmakedefine HAVE_LINUX_FILTER_H
++
++/* Define to 1 if you have the <linux/if_tun.h> header file. */
++#cmakedefine HAVE_LINUX_IF_TUN_H
++
++/* Define to 1 if you have the <linux/seccomp.h> header file. */
++#cmakedefine HAVE_LINUX_SECCOMP_H
++
++/* Define to 1 if you have the `llabs' function. */
++#cmakedefine HAVE_LLABS
++
++/* Define to 1 if you have the <locale.h> header file. */
++#cmakedefine HAVE_LOCALE_H
++
++/* Define to 1 if you have the `localtime_r' function. */
++#cmakedefine HAVE_LOCALTIME_R
++
++/* Define to 1 if you have the `login' function. */
++#cmakedefine HAVE_LOGIN
++
++/* Define to 1 if you have the <login_cap.h> header file. */
++#cmakedefine HAVE_LOGIN_CAP_H
++
++/* Define to 1 if you have the `login_getcapbool' function. */
++#cmakedefine HAVE_LOGIN_GETCAPBOOL
++
++/* Define to 1 if you have the `login_getpwclass' function. */
++#cmakedefine HAVE_LOGIN_GETPWCLASS
++
++/* Define to 1 if you have the <login.h> header file. */
++#cmakedefine HAVE_LOGIN_H
++
++/* Define to 1 if you have the `logout' function. */
++#cmakedefine HAVE_LOGOUT
++
++/* Define to 1 if you have the `logwtmp' function. */
++#cmakedefine HAVE_LOGWTMP
++
++/* Define to 1 if the system has the type `long double'. */
++#cmakedefine HAVE_LONG_DOUBLE
++
++/* Define to 1 if the system has the type `long long'. */
++#cmakedefine HAVE_LONG_LONG
++
++/* Define to 1 if you have the <maillock.h> header file. */
++#cmakedefine HAVE_MAILLOCK_H
++
++/* Define to 1 if your system has a GNU libc compatible `malloc' function, and
++   to 0 otherwise. */
++#cmakedefine HAVE_MALLOC
++
++/* Define to 1 if you have the `mblen' function. */
++#cmakedefine HAVE_MBLEN
++
++/* Define to 1 if you have the `mbtowc' function. */
++#cmakedefine HAVE_MBTOWC
++
++/* Define to 1 if you have the `memmem' function. */
++#cmakedefine HAVE_MEMMEM
++
++/* Define to 1 if you have the `memmove' function. */
++#cmakedefine HAVE_MEMMOVE
++
++/* Define to 1 if you have the <memory.h> header file. */
++#cmakedefine HAVE_MEMORY_H
++
++/* Define to 1 if you have the `memset_s' function. */
++#cmakedefine HAVE_MEMSET_S
++
++/* Define to 1 if you have the `mkdtemp' function. */
++#cmakedefine HAVE_MKDTEMP
++
++/* define if you have mode_t data type */
++#cmakedefine HAVE_MODE_T
++
++/* Some systems put nanosleep outside of libc */
++#cmakedefine HAVE_NANOSLEEP
++
++/* Define to 1 if you have the <ndir.h> header file. */
++#cmakedefine HAVE_NDIR_H
++
++/* Define to 1 if you have the <netdb.h> header file. */
++#cmakedefine HAVE_NETDB_H
++
++/* Define to 1 if you have the <netgroup.h> header file. */
++#cmakedefine HAVE_NETGROUP_H
++
++/* Define to 1 if you have the <net/if_tun.h> header file. */
++#cmakedefine HAVE_NET_IF_TUN_H
++
++/* Define to 1 if you have the <net/route.h> header file. */
++#cmakedefine HAVE_NET_ROUTE_H
++
++/* Define if you are on NeXT */
++#cmakedefine HAVE_NEXT
++
++/* Define to 1 if the system has the type `nfds_t'. */
++#cmakedefine HAVE_NFDS_T
++
++/* Define to 1 if you have the `ngetaddrinfo' function. */
++#cmakedefine HAVE_NGETADDRINFO
++
++/* Define to 1 if you have the `nl_langinfo' function. */
++#cmakedefine HAVE_NL_LANGINFO
++
++/* Define to 1 if you have the `nsleep' function. */
++#cmakedefine HAVE_NSLEEP
++
++/* Define to 1 if you have the `ogetaddrinfo' function. */
++#cmakedefine HAVE_OGETADDRINFO
++
++/* Define if you have an old version of PAM which takes only one argument to
++   pam_strerror */
++#cmakedefine HAVE_OLD_PAM
++
++/* Define to 1 if you have the `openlog_r' function. */
++#cmakedefine HAVE_OPENLOG_R
++
++/* Define to 1 if you have the `openpty' function. */
++#cmakedefine HAVE_OPENPTY
++
++/* as a macro */
++#cmakedefine HAVE_OPENSSL_ADD_ALL_ALGORITHMS
++
++/* Define to 1 if you have the `OPENSSL_init_crypto' function. */
++#cmakedefine HAVE_OPENSSL_INIT_CRYPTO
++
++/* Define to 1 if you have the `OpenSSL_version' function. */
++#cmakedefine HAVE_OPENSSL_VERSION
++
++/* Define to 1 if you have the `OpenSSL_version_num' function. */
++#cmakedefine HAVE_OPENSSL_VERSION_NUM
++
++/* Define if you have Digital Unix Security Integration Architecture */
++#cmakedefine HAVE_OSF_SIA
++
++/* Define to 1 if you have the `pam_getenvlist' function. */
++#cmakedefine HAVE_PAM_GETENVLIST
++
++/* Define to 1 if you have the <pam/pam_appl.h> header file. */
++#cmakedefine HAVE_PAM_PAM_APPL_H
++
++/* Define to 1 if you have the `pam_putenv' function. */
++#cmakedefine HAVE_PAM_PUTENV
++
++/* Define to 1 if you have the <paths.h> header file. */
++#cmakedefine HAVE_PATHS_H
++
++/* Define if you have ut_pid in utmp.h */
++#cmakedefine HAVE_PID_IN_UTMP
++
++/* define if you have pid_t data type */
++#cmakedefine HAVE_PID_T
++
++/* Define to 1 if you have the `pledge' function. */
++#cmakedefine HAVE_PLEDGE
++
++/* Define to 1 if you have the `poll' function. */
++#cmakedefine HAVE_POLL
++
++/* Define to 1 if you have the <poll.h> header file. */
++#cmakedefine HAVE_POLL_H
++
++/* Define to 1 if you have the `ppoll' function. */
++#cmakedefine HAVE_PPOLL
++
++/* Define to 1 if you have the `prctl' function. */
++#cmakedefine HAVE_PRCTL
++
++/* Define to 1 if you have the `priv_basicset' function. */
++#cmakedefine HAVE_PRIV_BASICSET
++
++/* Define to 1 if you have the <priv.h> header file. */
++#cmakedefine HAVE_PRIV_H
++
++/* Define to 1 if you have the `procctl' function. */
++#cmakedefine HAVE_PROCCTL
++
++/* Define if you have /proc/$pid/fd */
++#cmakedefine HAVE_PROC_PID
++
++/* Define to 1 if you have the `proc_pidinfo' function. */
++#cmakedefine HAVE_PROC_PIDINFO
++
++/* Define to 1 if you have the `pselect' function. */
++#cmakedefine HAVE_PSELECT
++
++/* Define to 1 if you have the `pstat' function. */
++#cmakedefine HAVE_PSTAT
++
++/* Define to 1 if you have the <pty.h> header file. */
++#cmakedefine HAVE_PTY_H
++
++/* Define to 1 if you have the `pututline' function. */
++#cmakedefine HAVE_PUTUTLINE
++
++/* Define to 1 if you have the `pututxline' function. */
++#cmakedefine HAVE_PUTUTXLINE
++
++/* Define to 1 if you have the `raise' function. */
++#cmakedefine HAVE_RAISE
++
++/* Define to 1 if you have the `readpassphrase' function. */
++#cmakedefine HAVE_READPASSPHRASE
++
++/* Define to 1 if you have the <readpassphrase.h> header file. */
++#cmakedefine HAVE_READPASSPHRASE_H
++
++/* Define to 1 if your system has a GNU libc compatible `realloc' function,
++   and to 0 otherwise. */
++#cmakedefine HAVE_REALLOC
++
++/* Define to 1 if you have the `reallocarray' function. */
++#cmakedefine HAVE_REALLOCARRAY
++
++/* Define to 1 if you have the `realpath' function. */
++#cmakedefine HAVE_REALPATH
++
++/* Define to 1 if you have the `recallocarray' function. */
++#cmakedefine HAVE_RECALLOCARRAY
++
++/* Define to 1 if you have the `recvmsg' function. */
++#cmakedefine HAVE_RECVMSG
++
++/* sys/resource.h has RLIMIT_NPROC */
++#cmakedefine HAVE_RLIMIT_NPROC "@HAVE_RLIMIT_NPROC@"
++
++/* Define to 1 if you have the <rpc/types.h> header file. */
++#cmakedefine HAVE_RPC_TYPES_H
++
++/* Define to 1 if you have the `rresvport_af' function. */
++#cmakedefine HAVE_RRESVPORT_AF
++
++/* Define to 1 if you have the `RSA_generate_key_ex' function. */
++#cmakedefine HAVE_RSA_GENERATE_KEY_EX
++
++/* Define to 1 if you have the `RSA_get0_crt_params' function. */
++#cmakedefine HAVE_RSA_GET0_CRT_PARAMS
++
++/* Define to 1 if you have the `RSA_get0_factors' function. */
++#cmakedefine HAVE_RSA_GET0_FACTORS
++
++/* Define to 1 if you have the `RSA_get0_key' function. */
++#cmakedefine HAVE_RSA_GET0_KEY
++
++/* Define to 1 if you have the `RSA_get_default_method' function. */
++#cmakedefine HAVE_RSA_GET_DEFAULT_METHOD
++
++/* Define to 1 if you have the `RSA_meth_dup' function. */
++#cmakedefine HAVE_RSA_METH_DUP
++
++/* Define to 1 if you have the `RSA_meth_free' function. */
++#cmakedefine HAVE_RSA_METH_FREE
++
++/* Define to 1 if you have the `RSA_meth_get_finish' function. */
++#cmakedefine HAVE_RSA_METH_GET_FINISH
++
++/* Define to 1 if you have the `RSA_meth_set1_name' function. */
++#cmakedefine HAVE_RSA_METH_SET1_NAME
++
++/* Define to 1 if you have the `RSA_meth_set_finish' function. */
++#cmakedefine HAVE_RSA_METH_SET_FINISH
++
++/* Define to 1 if you have the `RSA_meth_set_priv_dec' function. */
++#cmakedefine HAVE_RSA_METH_SET_PRIV_DEC
++
++/* Define to 1 if you have the `RSA_meth_set_priv_enc' function. */
++#cmakedefine HAVE_RSA_METH_SET_PRIV_ENC
++
++/* Define to 1 if you have the `RSA_set0_crt_params' function. */
++#cmakedefine HAVE_RSA_SET0_CRT_PARAMS
++
++/* Define to 1 if you have the `RSA_set0_factors' function. */
++#cmakedefine HAVE_RSA_SET0_FACTORS
++
++/* Define to 1 if you have the `RSA_set0_key' function. */
++#cmakedefine HAVE_RSA_SET0_KEY
++
++/* Define to 1 if you have the <sandbox.h> header file. */
++#cmakedefine HAVE_SANDBOX_H
++
++/* Define to 1 if you have the `sandbox_init' function. */
++#cmakedefine HAVE_SANDBOX_INIT
++
++/* define if you have sa_family_t data type */
++#cmakedefine HAVE_SA_FAMILY_T
++
++/* Define to 1 if you have the `scan_scaled' function. */
++#cmakedefine HAVE_SCAN_SCALED
++
++/* Define if you have SecureWare-based protected password database */
++#cmakedefine HAVE_SECUREWARE
++
++/* Define to 1 if you have the <security/pam_appl.h> header file. */
++#cmakedefine HAVE_SECURITY_PAM_APPL_H
++
++/* Define to 1 if you have the `sendmsg' function. */
++#cmakedefine HAVE_SENDMSG
++
++/* Define to 1 if you have the `setauthdb' function. */
++#cmakedefine HAVE_SETAUTHDB
++
++/* Define to 1 if you have the `setdtablesize' function. */
++#cmakedefine HAVE_SETDTABLESIZE
++
++/* Define to 1 if you have the `setegid' function. */
++#cmakedefine HAVE_SETEGID
++
++/* Define to 1 if you have the `setenv' function. */
++#cmakedefine HAVE_SETENV
++
++/* Define to 1 if you have the `seteuid' function. */
++#cmakedefine HAVE_SETEUID
++
++/* Define to 1 if you have the `setgroupent' function. */
++#cmakedefine HAVE_SETGROUPENT
++
++/* Define to 1 if you have the `setgroups' function. */
++#cmakedefine HAVE_SETGROUPS
++
++/* Define to 1 if you have the `setlinebuf' function. */
++#cmakedefine HAVE_SETLINEBUF
++
++/* Define to 1 if you have the `setlogin' function. */
++#cmakedefine HAVE_SETLOGIN
++
++/* Define to 1 if you have the `setluid' function. */
++#cmakedefine HAVE_SETLUID
++
++/* Define to 1 if you have the `setpassent' function. */
++#cmakedefine HAVE_SETPASSENT
++
++/* Define to 1 if you have the `setpcred' function. */
++#cmakedefine HAVE_SETPCRED
++
++/* Define to 1 if you have the `setpflags' function. */
++#cmakedefine HAVE_SETPFLAGS
++
++/* Define to 1 if you have the `setppriv' function. */
++#cmakedefine HAVE_SETPPRIV
++
++/* Define to 1 if you have the `setproctitle' function. */
++#cmakedefine HAVE_SETPROCTITLE
++
++/* Define to 1 if you have the `setregid' function. */
++#cmakedefine HAVE_SETREGID
++
++/* Define to 1 if you have the `setresgid' function. */
++#cmakedefine HAVE_SETRESGID
++
++/* Define to 1 if you have the `setresuid' function. */
++#cmakedefine HAVE_SETRESUID
++
++/* Define to 1 if you have the `setreuid' function. */
++#cmakedefine HAVE_SETREUID
++
++/* Define to 1 if you have the `setrlimit' function. */
++#cmakedefine HAVE_SETRLIMIT
++
++/* Define to 1 if you have the `setsid' function. */
++#cmakedefine HAVE_SETSID
++
++/* Define to 1 if you have the `setutent' function. */
++#cmakedefine HAVE_SETUTENT
++
++/* Define to 1 if you have the `setutxdb' function. */
++#cmakedefine HAVE_SETUTXDB
++
++/* Define to 1 if you have the `setutxent' function. */
++#cmakedefine HAVE_SETUTXENT
++
++/* Define to 1 if you have the `setvbuf' function. */
++#cmakedefine HAVE_SETVBUF
++
++/* Define to 1 if you have the `set_id' function. */
++#cmakedefine HAVE_SET_ID
++
++/* Define to 1 if you have the `SHA256Update' function. */
++#cmakedefine HAVE_SHA256UPDATE
++
++/* Define to 1 if you have the <sha2.h> header file. */
++#cmakedefine HAVE_SHA2_H
++
++/* Define to 1 if you have the `SHA384Update' function. */
++#cmakedefine HAVE_SHA384UPDATE
++
++/* Define to 1 if you have the `SHA512Update' function. */
++#cmakedefine HAVE_SHA512UPDATE
++
++/* Define to 1 if you have the <shadow.h> header file. */
++#cmakedefine HAVE_SHADOW_H
++
++/* Define to 1 if you have the `sigaction' function. */
++#cmakedefine HAVE_SIGACTION
++
++/* Define to 1 if the system has the type `sighandler_t'. */
++#cmakedefine HAVE_SIGHANDLER_T
++
++/* Define to 1 if you have the `sigvec' function. */
++#cmakedefine HAVE_SIGVEC
++
++/* Define to 1 if the system has the type `sig_atomic_t'. */
++#cmakedefine HAVE_SIG_ATOMIC_T
++
++/* define if you have size_t data type */
++#cmakedefine HAVE_SIZE_T
++
++/* Define to 1 if you have the `snprintf' function. */
++#cmakedefine HAVE_SNPRINTF
++
++/* Define to 1 if you have the `socketpair' function. */
++#cmakedefine HAVE_SOCKETPAIR
++
++/* Have PEERCRED socket option */
++#cmakedefine HAVE_SO_PEERCRED
++
++/* define if you have ssize_t data type */
++#cmakedefine HAVE_SSIZE_T
++
++/* Fields in struct sockaddr_storage */
++#cmakedefine HAVE_SS_FAMILY_IN_SS
++
++/* Define if you have ut_ss in utmpx.h */
++#cmakedefine HAVE_SS_IN_UTMPX
++
++/* Define to 1 if you have the `statfs' function. */
++#cmakedefine HAVE_STATFS
++
++/* Define to 1 if you have the `statvfs' function. */
++#cmakedefine HAVE_STATVFS
++
++/* Define to 1 if you have the <stddef.h> header file. */
++#cmakedefine HAVE_STDDEF_H
++
++/* Define to 1 if you have the <stdint.h> header file. */
++#cmakedefine HAVE_STDINT_H
++
++/* Define to 1 if you have the <stdlib.h> header file. */
++#cmakedefine HAVE_STDLIB_H
++
++/* Define to 1 if you have the `strcasestr' function. */
++#cmakedefine HAVE_STRCASESTR
++
++/* Define to 1 if you have the `strdup' function. */
++#cmakedefine HAVE_STRDUP
++
++/* Define to 1 if you have the `strerror' function. */
++#cmakedefine HAVE_STRERROR
++
++/* Define to 1 if you have the `strftime' function. */
++#cmakedefine HAVE_STRFTIME
++
++/* Define to 1 if you have the <strings.h> header file. */
++#cmakedefine HAVE_STRINGS_H
++
++/* Define to 1 if you have the <string.h> header file. */
++#cmakedefine HAVE_STRING_H
++
++/* Define to 1 if you have the `strlcat' function. */
++#cmakedefine HAVE_STRLCAT
++
++/* Define to 1 if you have the `strlcpy' function. */
++#cmakedefine HAVE_STRLCPY
++
++/* Define to 1 if you have the `strmode' function. */
++#cmakedefine HAVE_STRMODE
++
++/* Define to 1 if you have the `strndup' function. */
++#cmakedefine HAVE_STRNDUP
++
++/* Define to 1 if you have the `strnlen' function. */
++#cmakedefine HAVE_STRNLEN
++
++/* Define to 1 if you have the `strnvis' function. */
++#cmakedefine HAVE_STRNVIS
++
++/* Define to 1 if you have the `strptime' function. */
++#cmakedefine HAVE_STRPTIME
++
++/* Define to 1 if you have the `strsep' function. */
++#cmakedefine HAVE_STRSEP
++
++/* Define to 1 if you have the `strsignal' function. */
++#cmakedefine HAVE_STRSIGNAL
++
++/* Define to 1 if you have the `strtoll' function. */
++#cmakedefine HAVE_STRTOLL
++
++/* Define to 1 if you have the `strtonum' function. */
++#cmakedefine HAVE_STRTONUM
++
++/* Define to 1 if you have the `strtoul' function. */
++#cmakedefine HAVE_STRTOUL
++
++/* Define to 1 if you have the `strtoull' function. */
++#cmakedefine HAVE_STRTOULL
++
++/* define if you have struct addrinfo data type */
++#cmakedefine HAVE_STRUCT_ADDRINFO
++
++/* define if you have struct in6_addr data type */
++#cmakedefine HAVE_STRUCT_IN6_ADDR
++
++/* Define to 1 if `pw_change' is a member of `struct passwd'. */
++#cmakedefine HAVE_STRUCT_PASSWD_PW_CHANGE
++
++/* Define to 1 if `pw_class' is a member of `struct passwd'. */
++#cmakedefine HAVE_STRUCT_PASSWD_PW_CLASS
++
++/* Define to 1 if `pw_expire' is a member of `struct passwd'. */
++#cmakedefine HAVE_STRUCT_PASSWD_PW_EXPIRE
++
++/* Define to 1 if `pw_gecos' is a member of `struct passwd'. */
++#cmakedefine HAVE_STRUCT_PASSWD_PW_GECOS
++
++/* Define to 1 if `fd' is a member of `struct pollfd'. */
++#cmakedefine HAVE_STRUCT_POLLFD_FD
++
++/* define if you have struct sockaddr_in6 data type */
++#cmakedefine HAVE_STRUCT_SOCKADDR_IN6
++
++/* Define to 1 if `sin6_scope_id' is a member of `struct sockaddr_in6'. */
++#cmakedefine HAVE_STRUCT_SOCKADDR_IN6_SIN6_SCOPE_ID
++
++/* define if you have struct sockaddr_storage data type */
++#cmakedefine HAVE_STRUCT_SOCKADDR_STORAGE
++
++/* Define to 1 if `f_files' is a member of `struct statfs'. */
++#cmakedefine HAVE_STRUCT_STATFS_F_FILES
++
++/* Define to 1 if `f_flags' is a member of `struct statfs'. */
++#cmakedefine HAVE_STRUCT_STATFS_F_FLAGS
++
++/* Define to 1 if `st_blksize' is a member of `struct stat'. */
++#cmakedefine HAVE_STRUCT_STAT_ST_BLKSIZE
++
++/* Define to 1 if `st_mtim' is a member of `struct stat'. */
++#cmakedefine HAVE_STRUCT_STAT_ST_MTIM
++
++/* Define to 1 if `st_mtime' is a member of `struct stat'. */
++#cmakedefine HAVE_STRUCT_STAT_ST_MTIME
++
++/* define if you have struct timespec */
++#cmakedefine HAVE_STRUCT_TIMESPEC
++
++/* define if you have struct timeval */
++#cmakedefine HAVE_STRUCT_TIMEVAL
++
++/* Define to 1 if you have the `swap32' function. */
++#cmakedefine HAVE_SWAP32
++
++/* Define to 1 if you have the `sysconf' function. */
++#cmakedefine HAVE_SYSCONF
++
++/* Define if you have syslen in utmpx.h */
++#cmakedefine HAVE_SYSLEN_IN_UTMPX
++
++/* Define to 1 if you have the <sys/audit.h> header file. */
++#cmakedefine HAVE_SYS_AUDIT_H
++
++/* Define to 1 if you have the <sys/bitypes.h> header file. */
++#cmakedefine HAVE_SYS_BITYPES_H
++
++/* Define to 1 if you have the <sys/bsdtty.h> header file. */
++#cmakedefine HAVE_SYS_BSDTTY_H
++
++/* Define to 1 if you have the <sys/byteorder.h> header file. */
++#cmakedefine HAVE_SYS_BYTEORDER_H
++
++/* Define to 1 if you have the <sys/capsicum.h> header file. */
++#cmakedefine HAVE_SYS_CAPSICUM_H
++
++/* Define to 1 if you have the <sys/cdefs.h> header file. */
++#cmakedefine HAVE_SYS_CDEFS_H
++
++/* Define to 1 if you have the <sys/dir.h> header file. */
++#cmakedefine HAVE_SYS_DIR_H
++
++/* Define if your system defines sys_errlist[] */
++#cmakedefine HAVE_SYS_ERRLIST
++
++/* Define to 1 if you have the <sys/file.h> header file. */
++#cmakedefine HAVE_SYS_FILE_H
++
++/* Define to 1 if you have the <sys/label.h> header file. */
++#cmakedefine HAVE_SYS_LABEL_H
++
++/* Define to 1 if you have the <sys/mman.h> header file. */
++#cmakedefine HAVE_SYS_MMAN_H
++
++/* Define to 1 if you have the <sys/mount.h> header file. */
++#cmakedefine HAVE_SYS_MOUNT_H
++
++/* Define to 1 if you have the <sys/ndir.h> header file. */
++#cmakedefine HAVE_SYS_NDIR_H
++
++/* Define if your system defines sys_nerr */
++#cmakedefine HAVE_SYS_NERR
++
++/* Define to 1 if you have the <sys/param.h> header file. */
++#cmakedefine HAVE_SYS_PARAM_H
++
++/* Define to 1 if you have the <sys/poll.h> header file. */
++#cmakedefine01 HAVE_SYS_POLL_H
++
++/* Define to 1 if you have the <sys/prctl.h> header file. */
++#cmakedefine HAVE_SYS_PRCTL_H
++
++/* Define to 1 if you have the <sys/procctl.h> header file. */
++#cmakedefine HAVE_SYS_PROCCTL_H
++
++/* Define to 1 if you have the <sys/pstat.h> header file. */
++#cmakedefine HAVE_SYS_PSTAT_H
++
++/* Define to 1 if you have the <sys/ptms.h> header file. */
++#cmakedefine HAVE_SYS_PTMS_H
++
++/* Define to 1 if you have the <sys/ptrace.h> header file. */
++#cmakedefine HAVE_SYS_PTRACE_H
++
++/* Define to 1 if you have the <sys/random.h> header file. */
++#cmakedefine HAVE_SYS_RANDOM_H
++
++/* Define to 1 if you have the <sys/select.h> header file. */
++#cmakedefine HAVE_SYS_SELECT_H
++
++/* Define to 1 if you have the <sys/statvfs.h> header file. */
++#cmakedefine HAVE_SYS_STATVFS_H
++
++/* Define to 1 if you have the <sys/stat.h> header file. */
++#cmakedefine HAVE_SYS_STAT_H
++
++/* Define to 1 if you have the <sys/stream.h> header file. */
++#cmakedefine HAVE_SYS_STREAM_H
++
++/* Define to 1 if you have the <sys/stropts.h> header file. */
++#cmakedefine HAVE_SYS_STROPTS_H
++
++/* Define to 1 if you have the <sys/strtio.h> header file. */
++#cmakedefine HAVE_SYS_STRTIO_H
++
++/* Define to 1 if you have the <sys/sysctl.h> header file. */
++#cmakedefine HAVE_SYS_SYSCTL_H
++
++/* Force use of sys/syslog.h on Ultrix */
++#cmakedefine HAVE_SYS_SYSLOG_H
++
++/* Define to 1 if you have the <sys/sysmacros.h> header file. */
++#cmakedefine HAVE_SYS_SYSMACROS_H
++
++/* Define to 1 if you have the <sys/timers.h> header file. */
++#cmakedefine HAVE_SYS_TIMERS_H
++
++/* Define to 1 if you have the <sys/time.h> header file. */
++#cmakedefine HAVE_SYS_TIME_H
++
++/* Define to 1 if you have the <sys/types.h> header file. */
++#cmakedefine HAVE_SYS_TYPES_H
++
++/* Define to 1 if you have the <sys/un.h> header file. */
++#cmakedefine HAVE_SYS_UN_H
++
++/* Define to 1 if you have the <sys/vfs.h> header file. */
++#cmakedefine HAVE_SYS_VFS_H
++
++/* Define to 1 if you have the `tcgetpgrp' function. */
++#cmakedefine HAVE_TCGETPGRP
++
++/* Define to 1 if you have the `tcsendbreak' function. */
++#cmakedefine HAVE_TCSENDBREAK
++
++/* Define to 1 if you have the `time' function. */
++#cmakedefine HAVE_TIME
++
++/* Define to 1 if you have the <time.h> header file. */
++#cmakedefine HAVE_TIME_H
++
++/* Define if you have ut_time in utmp.h */
++#cmakedefine HAVE_TIME_IN_UTMP
++
++/* Define if you have ut_time in utmpx.h */
++#cmakedefine HAVE_TIME_IN_UTMPX
++
++/* Define to 1 if you have the `timingsafe_bcmp' function. */
++#cmakedefine HAVE_TIMINGSAFE_BCMP
++
++/* Define to 1 if you have the <tmpdir.h> header file. */
++#cmakedefine HAVE_TMPDIR_H
++
++/* Define to 1 if you have the `truncate' function. */
++#cmakedefine HAVE_TRUNCATE
++
++/* Define to 1 if you have the <ttyent.h> header file. */
++#cmakedefine HAVE_TTYENT_H
++
++/* Define if you have ut_tv in utmp.h */
++#cmakedefine HAVE_TV_IN_UTMP
++
++/* Define if you have ut_tv in utmpx.h */
++#cmakedefine HAVE_TV_IN_UTMPX
++
++/* Define if you have ut_type in utmp.h */
++#cmakedefine HAVE_TYPE_IN_UTMP
++
++/* Define if you have ut_type in utmpx.h */
++#cmakedefine HAVE_TYPE_IN_UTMPX
++
++/* Define to 1 if you have the <ucred.h> header file. */
++#cmakedefine HAVE_UCRED_H
++
++/* Define to 1 if the system has the type `uintmax_t'. */
++#cmakedefine HAVE_UINTMAX_T
++
++/* define if you have uintxx_t data type */
++#cmakedefine HAVE_UINTXX_T
++
++/* Define to 1 if you have the <unistd.h> header file. */
++#cmakedefine HAVE_UNISTD_H
++
++/* Define to 1 if you have the `unsetenv' function. */
++#cmakedefine HAVE_UNSETENV
++
++/* Define to 1 if the system has the type `unsigned long long'. */
++#cmakedefine HAVE_UNSIGNED_LONG_LONG
++
++/* Define to 1 if you have the `updwtmp' function. */
++#cmakedefine HAVE_UPDWTMP
++
++/* Define to 1 if you have the `updwtmpx' function. */
++#cmakedefine HAVE_UPDWTMPX
++
++/* Define to 1 if you have the <usersec.h> header file. */
++#cmakedefine HAVE_USERSEC_H
++
++/* Define to 1 if you have the `user_from_uid' function. */
++#cmakedefine HAVE_USER_FROM_UID
++
++/* Define to 1 if you have the `usleep' function. */
++#cmakedefine HAVE_USLEEP
++
++/* Define to 1 if you have the <util.h> header file. */
++#cmakedefine HAVE_UTIL_H
++
++/* Define to 1 if you have the `utimensat' function. */
++#cmakedefine HAVE_UTIMENSAT
++
++/* Define to 1 if you have the `utimes' function. */
++#cmakedefine HAVE_UTIMES
++
++/* Define to 1 if you have the <utime.h> header file. */
++#cmakedefine HAVE_UTIME_H
++
++/* Define to 1 if you have the `utmpname' function. */
++#cmakedefine HAVE_UTMPNAME
++
++/* Define to 1 if you have the `utmpxname' function. */
++#cmakedefine HAVE_UTMPXNAME
++
++/* Define to 1 if you have the <utmpx.h> header file. */
++#cmakedefine HAVE_UTMPX_H
++
++/* Define to 1 if you have the <utmp.h> header file. */
++#cmakedefine01 HAVE_UTMP_H
++
++/* define if you have u_char data type */
++#cmakedefine HAVE_U_CHAR
++
++/* define if you have u_int data type */
++#cmakedefine HAVE_U_INT
++
++/* define if you have u_int64_t data type */
++#cmakedefine HAVE_U_INT64_T
++
++/* define if you have u_intxx_t data type */
++#cmakedefine HAVE_U_INTXX_T
++
++/* Define to 1 if you have the `vasprintf' function. */
++#cmakedefine HAVE_VASPRINTF
++
++/* Define if va_copy exists */
++#cmakedefine HAVE_VA_COPY
++
++/* Define to 1 if you have the <vis.h> header file. */
++#cmakedefine HAVE_VIS_H
++
++/* Define to 1 if you have the `vsnprintf' function. */
++#cmakedefine HAVE_VSNPRINTF
++
++/* Define to 1 if you have the `waitpid' function. */
++#cmakedefine HAVE_WAITPID
++
++/* Define to 1 if you have the `warn' function. */
++#cmakedefine HAVE_WARN
++
++/* Define to 1 if you have the <wchar.h> header file. */
++#cmakedefine HAVE_WCHAR_H
++
++/* Define to 1 if you have the `wcwidth' function. */
++#cmakedefine HAVE_WCWIDTH
++
++/* Define to 1 if you have the `_getlong' function. */
++#cmakedefine HAVE__GETLONG
++
++/* Define to 1 if you have the `_getpty' function. */
++#cmakedefine HAVE__GETPTY
++
++/* Define to 1 if you have the `_getshort' function. */
++#cmakedefine HAVE__GETSHORT
++
++/* Define if you have struct __res_state _res as an extern */
++#cmakedefine HAVE__RES_EXTERN
++
++/* Define to 1 if you have the `__b64_ntop' function. */
++#cmakedefine HAVE___B64_NTOP
++
++/* Define to 1 if you have the `__b64_pton' function. */
++#cmakedefine HAVE___B64_PTON
++
++/* Define if compiler implements __FUNCTION__ */
++#cmakedefine HAVE___FUNCTION__
++
++/* Define if libc defines __progname */
++#cmakedefine HAVE___PROGNAME
++
++/* Fields in struct sockaddr_storage */
++#cmakedefine HAVE___SS_FAMILY_IN_SS
++
++/* Define if __va_copy exists */
++#cmakedefine HAVE___VA_COPY
++
++/* Define if compiler implements __func__ */
++#cmakedefine HAVE___func__
++
++/* Define this if you are using the Heimdal version of Kerberos V5 */
++#cmakedefine HEIMDAL
++
++/* Define if you need to use IP address instead of hostname in $DISPLAY */
++#cmakedefine IPADDR_IN_DISPLAY
++
++/* Detect IPv4 in IPv6 mapped addresses and treat as IPv4 */
++#cmakedefine IPV4_IN_IPV6
++
++/* Define if your system choked on IP TOS setting */
++#cmakedefine IP_TOS_IS_BROKEN
++
++/* Define if you want Kerberos 5 support */
++#cmakedefine KRB5
++
++/* Define if pututxline updates lastlog too */
++#cmakedefine LASTLOG_WRITE_PUTUTXLINE
++
++/* Define to whatever link() returns for "not supported" if it doesn't return
++   EOPNOTSUPP. */
++#cmakedefine LINK_OPNOTSUPP_ERRNO @LINK_OPNOTSUPP_ERRNO@
++
++/* Adjust Linux out-of-memory killer */
++#cmakedefine LINUX_OOM_ADJUST
++
++/* max value of long long calculated by configure */
++#cmakedefine LLONG_MAX
++
++/* min value of long long calculated by configure */
++#cmakedefine LLONG_MIN
++
++/* Account locked with pw(1) */
++#cmakedefine LOCKED_PASSWD_PREFIX "@LOCKED_PASSWORD_PREFIX@"
++
++/* String used in /etc/passwd to denote locked account */
++#cmakedefine LOCKED_PASSWD_STRING
++
++/* String used in /etc/passwd to denote locked account */
++#cmakedefine LOCKED_PASSWD_SUBSTR
++
++/* Some systems need a utmpx entry for /bin/login to work */
++#cmakedefine LOGIN_NEEDS_UTMPX
++
++/* Set this to your mail directory if you do not have _PATH_MAILDIR */
++#cmakedefine MAIL_DIRECTORY
++
++/* Need setpgrp to for controlling tty */
++#cmakedefine NEED_SETPGRP
++
++/* compiler does not accept __attribute__ on prototype args */
++#cmakedefine NO_ATTRIBUTE_ON_PROTOTYPE_ARGS
++
++/* compiler does not accept __attribute__ on return types */
++#cmakedefine NO_ATTRIBUTE_ON_RETURN_TYPE
++
++/* SA_RESTARTed signals do no interrupt select */
++#cmakedefine NO_SA_RESTART
++
++/* Define to disable UID restoration test */
++#cmakedefine NO_UID_RESTORATION_TEST
++
++/* Define if X11 doesn't support AF_UNIX sockets on that system */
++#cmakedefine NO_X11_UNIX_SOCKETS
++
++/* Define if EVP_DigestUpdate returns void */
++#cmakedefine OPENSSL_EVP_DIGESTUPDATE_VOID
++
++/* OpenSSL has ECC */
++#cmakedefine OPENSSL_HAS_ECC
++
++/* libcrypto has NID_X9_62_prime256v1 */
++#cmakedefine OPENSSL_HAS_NISTP256
++
++/* libcrypto has NID_secp384r1 */
++#cmakedefine OPENSSL_HAS_NISTP384
++
++/* libcrypto has NID_secp521r1 */
++#cmakedefine OPENSSL_HAS_NISTP521
++
++/* libcrypto has EVP AES CTR */
++#cmakedefine OPENSSL_HAVE_EVPCTR
++
++/* libcrypto has EVP AES GCM */
++#cmakedefine OPENSSL_HAVE_EVPGCM
++
++/* libcrypto is missing AES 192 and 256 bit functions */
++#cmakedefine OPENSSL_LOBOTOMISED_AES
++
++/* Define if you want the OpenSSL internally seeded PRNG only */
++#cmakedefine OPENSSL_PRNG_ONLY
++
++/* Define to the address where bug reports for this package should be sent. */
++#cmakedefine PACKAGE_BUGREPORT "@PACKAGE_BUGREPORT@"
++
++/* Define to the full name of this package. */
++#cmakedefine PACKAGE_NAME "@PACKAGE_NAME@"
++
++/* Define to the full name and version of this package. */
++#cmakedefine PACKAGE_STRING "@PACKAGE_STRING@"
++
++/* Define to the one symbol short name of this package. */
++#cmakedefine PACKAGE_TARNAME "@PACKAGE_TARNAME@"
++
++/* Define to the home page for this package. */
++#cmakedefine PACKAGE_URL "@PACKAGE_URL@"
++
++/* Define to the version of this package. */
++#cmakedefine PACKAGE_VERSION "@PACKAGE_VERSION@"
++
++/* Define if you are using Solaris-derived PAM which passes pam_messages to
++   the conversation function with an extra level of indirection */
++#cmakedefine PAM_SUN_CODEBASE
++
++/* Work around problematic Linux PAM modules handling of PAM_TTY */
++#cmakedefine PAM_TTY_KLUDGE
++
++/* must supply username to passwd */
++#cmakedefine PASSWD_NEEDS_USERNAME
++
++/* System dirs owned by bin (uid 2) */
++#cmakedefine PLATFORM_SYS_DIR_UID
++
++/* Port number of PRNGD/EGD random number socket */
++#cmakedefine PRNGD_PORT
++
++/* Location of PRNGD/EGD random number socket */
++#cmakedefine PRNGD_SOCKET
++
++/* read(1) can return 0 for a non-closed fd */
++#cmakedefine PTY_ZEROREAD
++
++/* Sandbox using capsicum */
++#cmakedefine SANDBOX_CAPSICUM
++
++/* Sandbox using Darwin sandbox_init(3) */
++#cmakedefine SANDBOX_DARWIN
++
++/* no privsep sandboxing */
++#cmakedefine SANDBOX_NULL
++
++/* Sandbox using pledge(2) */
++#cmakedefine SANDBOX_PLEDGE
++
++/* Sandbox using setrlimit(2) */
++#cmakedefine SANDBOX_RLIMIT
++
++/* Sandbox using seccomp filter */
++#cmakedefine SANDBOX_SECCOMP_FILTER
++
++/* setrlimit RLIMIT_FSIZE works */
++#cmakedefine SANDBOX_SKIP_RLIMIT_FSIZE
++
++/* define if setrlimit RLIMIT_NOFILE breaks things */
++#cmakedefine SANDBOX_SKIP_RLIMIT_NOFILE
++
++/* Sandbox using Solaris/Illumos privileges */
++#cmakedefine SANDBOX_SOLARIS
++
++/* Sandbox using systrace(4) */
++#cmakedefine SANDBOX_SYSTRACE
++
++/* Specify the system call convention in use */
++#cmakedefine SECCOMP_AUDIT_ARCH @SECCOMP_AUDIT_ARCH@
++
++/* Define if your platform breaks doing a seteuid before a setuid */
++#cmakedefine SETEUID_BREAKS_SETUID
++
++/* The size of `int', as computed by sizeof. */
++#cmakedefine SIZEOF_INT @SIZEOF_INT@
++
++/* The size of `long int', as computed by sizeof. */
++#cmakedefine SIZEOF_LONG_INT @SIZEOF_LONG_INT@
++
++/* The size of `long long int', as computed by sizeof. */
++#cmakedefine SIZEOF_LONG_LONG_INT @SIZEOF_LONG_LONG_INT@
++
++/* The size of `short int', as computed by sizeof. */
++#cmakedefine SIZEOF_SHORT_INT @SIZEOF_SHORT_INT@
++
++/* The size of `time_t', as computed by sizeof. */
++#cmakedefine SIZEOF_TIME_T @SIZEOF_TIME_T@
++
++/* Define as const if snprintf() can declare const char *fmt */
++#cmakedefine SNPRINTF_CONST @SNPRINTF_CONST@
++
++/* Define to a Set Process Title type if your system is supported by
++   bsd-setproctitle.c */
++#cmakedefine SPT_TYPE @SPT_TYPE@
++
++/* Define if sshd somehow reacquires a controlling TTY after setsid() */
++#cmakedefine SSHD_ACQUIRES_CTTY
++
++/* sshd PAM service name */
++#cmakedefine SSHD_PAM_SERVICE
++
++/* Define if pam_chauthtok wants real uid set to the unpriv'ed user */
++#cmakedefine SSHPAM_CHAUTHTOK_NEEDS_RUID
++
++/* Use audit debugging module */
++#cmakedefine SSH_AUDIT_EVENTS
++
++/* Windows is sensitive to read buffer size */
++#cmakedefine SSH_IOBUFSZ
++
++/* non-privileged user for privilege separation */
++#cmakedefine SSH_PRIVSEP_USER "@SSH_PRIVSEP_USER@"
++
++/* Use tunnel device compatibility to OpenBSD */
++#cmakedefine SSH_TUN_COMPAT_AF
++
++/* Open tunnel devices the FreeBSD way */
++#cmakedefine SSH_TUN_FREEBSD
++
++/* Open tunnel devices the Linux tun/tap way */
++#cmakedefine SSH_TUN_LINUX
++
++/* No layer 2 tunnel support */
++#cmakedefine SSH_TUN_NO_L2
++
++/* Open tunnel devices the OpenBSD way */
++#cmakedefine SSH_TUN_OPENBSD
++
++/* Prepend the address family to IP tunnel traffic */
++#cmakedefine SSH_TUN_PREPEND_AF
++
++/* Define to 1 if you have the ANSI C header files. */
++#cmakedefine STDC_HEADERS
++
++/* Define if you want a different $PATH for the superuser */
++#cmakedefine SUPERUSER_PATH
++
++/* syslog_r function is safe to use in in a signal handler */
++#cmakedefine SYSLOG_R_SAFE_IN_SIGHAND
++
++/* Support routing domains using Linux VRF */
++#cmakedefine SYS_RDOMAIN_LINUX
++
++/* Support passwords > 8 chars */
++#cmakedefine UNIXWARE_LONG_PASSWORDS
++
++/* Specify default $PATH */
++#cmakedefine USER_PATH "@USER_PATH@"
++
++/* Define this if you want to use libkafs' AFS support */
++#cmakedefine USE_AFS
++
++/* Use BSM audit module */
++#cmakedefine USE_BSM_AUDIT
++
++/* Use btmp to log bad logins */
++#cmakedefine USE_BTMP
++
++/* Use libedit for sftp */
++#cmakedefine USE_LIBEDIT
++
++/* Use Linux audit module */
++#cmakedefine USE_LINUX_AUDIT
++
++/* Enable OpenSSL engine support */
++#cmakedefine USE_OPENSSL_ENGINE
++
++/* Define if you want to enable PAM support */
++#cmakedefine USE_PAM
++
++/* Use PIPES instead of a socketpair() */
++#cmakedefine USE_PIPES
++
++/* Define if you have Solaris privileges */
++#cmakedefine USE_SOLARIS_PRIVS
++
++/* Define if you have Solaris process contracts */
++#cmakedefine USE_SOLARIS_PROCESS_CONTRACTS
++
++/* Define if you have Solaris projects */
++#cmakedefine USE_SOLARIS_PROJECTS
++
++/* compiler variable declarations after code */
++#cmakedefine VARIABLE_DECLARATION_AFTER_CODE
++
++/* compiler supports variable length arrays */
++#cmakedefine VARIABLE_LENGTH_ARRAYS
++
++/* Define if you shouldn't strip 'tty' from your ttyname in [uw]tmp */
++#cmakedefine WITH_ABBREV_NO_TTY
++
++/* Define if you want to enable AIX4's authenticate function */
++#cmakedefine WITH_AIXAUTHENTICATE
++
++/* Define if you have/want arrays (cluster-wide session management, not C
++   arrays) */
++#cmakedefine WITH_IRIX_ARRAY
++
++/* Define if you want IRIX audit trails */
++#cmakedefine WITH_IRIX_AUDIT
++
++/* Define if you want IRIX kernel jobs */
++#cmakedefine WITH_IRIX_JOBS
++
++/* Define if you want IRIX project management */
++#cmakedefine WITH_IRIX_PROJECT
++
++/* use libcrypto for cryptography */
++#cmakedefine WITH_OPENSSL
++
++/* Define if you want SELinux support. */
++#cmakedefine WITH_SELINUX
++
++/* Enable zlib */
++#cmakedefine WITH_ZLIB
++
++/* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
++   significant byte first (like Motorola and SPARC, unlike Intel). */
++#if defined AC_APPLE_UNIVERSAL_BUILD
++# if defined __BIG_ENDIAN__
++#  define WORDS_BIGENDIAN 1
++# endif
++#else
++# ifndef WORDS_BIGENDIAN
++#  undef WORDS_BIGENDIAN
++# endif
++#endif
++
++/* Define if xauth is found in your path */
++#cmakedefine XAUTH_PATH "@XAUTH_PATH@"
++
++/* Enable large inode numbers on Mac OS X 10.5.  */
++#ifndef _DARWIN_USE_64_BIT_INODE
++# define _DARWIN_USE_64_BIT_INODE 1
++#endif
++
++/* Number of bits in a file offset, on hosts where this is settable. */
++#cmakedefine _FILE_OFFSET_BITS
++
++/* Define for large files, on AIX-style hosts. */
++#cmakedefine _LARGE_FILES
++
++/* log for bad login attempts */
++#cmakedefine _PATH_BTMP "@_PATH_BTMP@"
++
++/* Full path of your "passwd" program */
++#cmakedefine _PATH_PASSWD_PROG "@_PATH_PASSWD_PROG@"
++
++/* Specify location of ssh.pid */
++#cmakedefine _PATH_SSH_PIDDIR "@_PATH_SSH_PIDDIR@"
++
++/* Define if we don't have struct __res_state in resolv.h */
++#cmakedefine __res_state
++
++/* Define to rpl_calloc if the replacement function should be used. */
++#cmakedefine calloc
++
++/* Define to `__inline__' or `__inline' if that's what the C compiler
++   calls it, or to nothing if 'inline' is not supported under any name.  */
++#ifndef __cplusplus
++/* #undef inline */
++#endif
++
++/* Define to rpl_malloc if the replacement function should be used. */
++#cmakedefine malloc
++
++/* Define to rpl_realloc if the replacement function should be used. */
++#cmakedefine realloc
++
++/* type to use in place of socklen_t if not defined */
++#cmakedefine socklen_t
+-- 
+2.25.1
+

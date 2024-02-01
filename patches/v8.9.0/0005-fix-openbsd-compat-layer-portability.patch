@@ -1,0 +1,53 @@
+From 67f729c8908b09ece51ed4af96f8f2a72eadafbd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
+Date: Thu, 1 Feb 2024 13:52:58 -0500
+Subject: [PATCH 5/8] fix openbsd-compat layer portability
+
+---
+ openbsd-compat/arc4random.c     | 14 ++++++++++++++
+ openbsd-compat/getrrsetbyname.c |  4 ++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/openbsd-compat/arc4random.c b/openbsd-compat/arc4random.c
+index 87c7a99e0..08b84cc02 100644
+--- a/openbsd-compat/arc4random.c
++++ b/openbsd-compat/arc4random.c
+@@ -37,6 +37,20 @@
+ # include <sys/random.h>
+ #endif
+ 
++#ifdef HAVE_ARC4RANDOM_LIBCRYPTO
++#ifndef HAVE_ARC4RANDOM
++#define HAVE_ARC4RANDOM
++#endif
++#ifndef HAVE_ARC4RANDOM_BUF
++#define HAVE_ARC4RANDOM_BUF
++#endif
++#ifndef HAVE_ARC4RANDOM_UNIFORM
++#define HAVE_ARC4RANDOM_UNIFORM
++#endif
++#undef HAVE_ARC4RANDOM_STIR
++void arc4random_stir(void) { }
++#endif
++
+ #ifndef HAVE_ARC4RANDOM
+ 
+ #define MINIMUM(a, b)    (((a) < (b)) ? (a) : (b))
+diff --git a/openbsd-compat/getrrsetbyname.c b/openbsd-compat/getrrsetbyname.c
+index dc6fe0533..7bea54764 100644
+--- a/openbsd-compat/getrrsetbyname.c
++++ b/openbsd-compat/getrrsetbyname.c
+@@ -55,6 +55,10 @@
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ 
++#ifdef __APPLE__
++#include <arpa/nameser_compat.h>
++#endif
++
+ #include "getrrsetbyname.h"
+ 
+ #if defined(HAVE_DECL_H_ERRNO) && !HAVE_DECL_H_ERRNO
+-- 
+2.25.1
+
