@@ -1,0 +1,71 @@
+From 7c0d871f557fb74f62642f94815cfe2072be5d4b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
+Date: Thu, 1 Feb 2024 13:54:15 -0500
+Subject: [PATCH 3/7] add rdp preconnection blob support
+
+---
+ sshconnect.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/sshconnect.c b/sshconnect.c
+index fcd7fbf8b..745da0e80 100644
+--- a/sshconnect.c
++++ b/sshconnect.c
+@@ -465,6 +465,39 @@ fail:
+ 	return sock;
+ }
+ 
++static int
++ssh_send_preconnection_blob(struct ssh *ssh, char *pcb)
++{
++    char* buffer;
++    int cch_pcb = strlen(pcb) + 1;
++    int cb_size = 16 + 2 + (cch_pcb * 2);
++
++    buffer = malloc(cb_size);
++
++    if (!buffer)
++        return -1;
++
++    // RDP_PRECONNECTION_PDU_V2
++    *((uint32_t*) &buffer[0]) = cb_size; // cbSize
++    *((uint32_t*) &buffer[4]) = 0; // Flags
++    *((uint32_t*) &buffer[8]) = 2; // Version
++    *((uint32_t*) &buffer[12]) = 0; // Id
++    *((uint16_t*) &buffer[16]) = cch_pcb; // cchPCB
++
++    // wszPCB (null-terminated UTF-16 string)
++    for (int i = 0; i < cch_pcb + 1; i++) {
++        buffer[18 + (i * 2) + 0] = pcb[i];
++        buffer[18 + (i * 2) + 1] = 0;
++    }
++
++    if (atomicio(vwrite, ssh_packet_get_connection_out(ssh), buffer, cb_size) != cb_size) {
++        error_f("write: %.100s", strerror(errno));
++    }
++    
++    free(buffer);
++    return 0;
++}
++
+ /*
+  * Opens a TCP/IP connection to the remote server on the given host.
+  * The address of the remote host will be returned in hostaddr.
+@@ -567,6 +600,14 @@ ssh_connect_direct(struct ssh *ssh, const char *host, struct addrinfo *aitop,
+ 	if (ssh_packet_set_connection(ssh, sock, sock) == NULL)
+ 		return -1; /* ssh_packet_set_connection logs error */
+ 
++	char* pcb = getenv("SSH_PCB");
++
++	if (pcb) {
++		if (ssh_send_preconnection_blob(ssh, pcb) < 0) {
++			error_f("error sending preconnection blob");
++		}
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.25.1
+

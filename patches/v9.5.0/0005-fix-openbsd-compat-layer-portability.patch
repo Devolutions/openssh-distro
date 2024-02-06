@@ -1,0 +1,27 @@
+From 2a971c81f3a62f32b9f321818cf9e74cfe718bf0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
+Date: Tue, 6 Feb 2024 10:43:34 -0500
+Subject: [PATCH 5/7] fix openbsd-compat layer portability
+
+---
+ openbsd-compat/getrrsetbyname.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/openbsd-compat/getrrsetbyname.c b/openbsd-compat/getrrsetbyname.c
+index 8f5939840..6283eaa7a 100644
+--- a/openbsd-compat/getrrsetbyname.c
++++ b/openbsd-compat/getrrsetbyname.c
+@@ -55,6 +55,10 @@
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ 
++#ifdef __APPLE__
++#include <arpa/nameser_compat.h>
++#endif
++
+ #include "getrrsetbyname.h"
+ 
+ #if defined(HAVE_DECL_H_ERRNO) && !HAVE_DECL_H_ERRNO
+-- 
+2.25.1
+

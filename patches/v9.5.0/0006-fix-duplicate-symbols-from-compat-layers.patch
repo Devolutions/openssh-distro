@@ -1,0 +1,32 @@
+From 2ecada20b10afd85116ec8c27576383dfce63980 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
+Date: Tue, 6 Feb 2024 10:44:05 -0500
+Subject: [PATCH 6/7] fix duplicate symbols from compat layers
+
+---
+ contrib/win32/win32compat/misc.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/contrib/win32/win32compat/misc.c b/contrib/win32/win32compat/misc.c
+index 2467ddffe..6219698c4 100644
+--- a/contrib/win32/win32compat/misc.c
++++ b/contrib/win32/win32compat/misc.c
+@@ -1512,6 +1512,7 @@ w32_ctime(const time_t* sourceTime)
+ 	return ctime_s(destTime, 26, sourceTime) == 0 ? destTime : NULL;
+ }
+ 
++#if 0
+ void
+ freezero(void *ptr, size_t sz)
+ {
+@@ -1520,6 +1521,7 @@ freezero(void *ptr, size_t sz)
+ 	explicit_bzero(ptr, sz);
+ 	free(ptr);
+ }
++#endif
+ 
+ int 
+ setenv(const char *name, const char *value, int rewrite)
+-- 
+2.25.1
+
