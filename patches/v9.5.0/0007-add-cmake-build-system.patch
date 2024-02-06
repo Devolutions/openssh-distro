@@ -1,21 +1,21 @@
-From eaec42592df651df6ce0f32e395a96d750aeb1d5 Mon Sep 17 00:00:00 2001
+From 5a0422e1dd978817698944b1744d1bee0c8f9d7b Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
 Date: Thu, 1 Feb 2024 13:44:42 -0500
 Subject: [PATCH 7/7] add cmake build system
 
 ---
- CMakeLists.txt    | 1763 +++++++++++++++++++++++++++++++++++++
+ CMakeLists.txt    | 1762 +++++++++++++++++++++++++++++++++++++
  cmake-config.h.in | 2104 +++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 3867 insertions(+)
+ 2 files changed, 3866 insertions(+)
  create mode 100644 CMakeLists.txt
  create mode 100644 cmake-config.h.in
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 new file mode 100644
-index 000000000..50f594a69
+index 000000000..72d8edc99
 --- /dev/null
 +++ b/CMakeLists.txt
-@@ -0,0 +1,1763 @@
+@@ -0,0 +1,1762 @@
 +
 +cmake_minimum_required(VERSION 3.18)
 +
@@ -709,7 +709,6 @@ index 000000000..50f594a69
 +        set(HAVE_SETRESUID 0)
 +        set(HAVE_SETREUID 0)
 +        set(HAVE_SETUTENT 0)
-+        set(HAVE_SETUTXENT 0)
 +        set(HAVE_TV_IN_UTMP 0)
 +        set(HAVE_ID_IN_UTMP 0)
 +        set(HAVE_PID_IN_UTMP 0)
