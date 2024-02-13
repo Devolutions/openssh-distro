@@ -1,0 +1,255 @@
+name: build package
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Upstream build version
+        required: true
+        type: string
+        default: '9.5.0'
+      revision:
+        description: build revision number
+        default: '0'
+        required: true
+      sign-nuget:
+        description: Sign nuget package
+        required: true
+        type: boolean
+        default: false
+      skip-publish:
+        description: Skip publishing
+        required: true
+        type: boolean
+        default: false
+      dry-run:
+        description: Dry run (simulate)
+        required: true
+        type: boolean
+        default: true
+env:
+    conan-version: 1.60.0
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-22.04
+    outputs:
+      package-env: ${{ steps.info.outputs.package-env }}
+      upstream-version: ${{ steps.info.outputs.upstream-version }}
+      package-revision: ${{ steps.info.outputs.package-revision }}
+      package-version: ${{ steps.info.outputs.package-version }}
+      dry-run: ${{ steps.info.outputs.dry-run }}
+
+    steps:
+      - name: Package information
+        id: info
+        shell: pwsh
+        run: |
+          $IsMasterBranch = ('${{ github.ref_name }}' -eq 'master')
+          try { $DryRun = [System.Boolean]::Parse('${{ inputs.dry-run }}') } catch { $DryRun = $true }
+          $PackageEnv = if ($IsMasterBranch) {
+            "publish-prod"
+          } else {
+            "publish-test"
+          }
+          if (-Not $IsMasterBranch) {
+            $DryRun = $true # force dry run when not on master branch
+          }
+          $UpstreamVersion = '${{ github.event.inputs.version }}'
+          $PackageRevision = '${{ github.event.inputs.revision }}'
+          $PackageVersion = "$UpstreamVersion.$PackageRevision"
+
+          echo "package-env=$PackageEnv" >> $Env:GITHUB_OUTPUT
+          echo "upstream-version=$UpstreamVersion" >> $Env:GITHUB_OUTPUT
+          echo "package-revision=$PackageRevision" >> $Env:GITHUB_OUTPUT
+          echo "package-version=$PackageVersion" >> $Env:GITHUB_OUTPUT
+          echo "dry-run=$($DryRun.ToString().ToLower())" >> $Env:GITHUB_OUTPUT
+
+          echo "::notice::DryRun: $DryRun"
+          echo "::notice::Version: $PackageVersion"
+
+  package:
+    name: build packages
+    runs-on: windows-2022
+    needs: preflight
+    environment: ${{ needs.preflight.outputs.package-env }}
+
+    steps:
+      - name: Clone project
+        uses: actions/checkout@v4
+
+      - name: Setup conan
+        run: |
+          pip install conan==${{ env.conan-version }} invoke Jinja2 urllib3 chardet requests --upgrade
+          conan config init
+          conan remote clean
+          conan config install --type=git -sf settings https://github.com/Devolutions/conan-public
+          conan remote add artifactory https://devolutions.jfrog.io/devolutions/api/conan/conan-local
+
+      - name: Setup code signing
+        run: |
+          dotnet tool install --global AzureSignTool
+          dotnet tool install --global NuGetKeyVaultSignTool
+
+          # trust test code signing CA
+          $TestCertsUrl = "https://raw.githubusercontent.com/Devolutions/devolutions-authenticode/master/data/certs"
+          Invoke-WebRequest -Uri "$TestCertsUrl/authenticode-test-ca.crt" -OutFile ".\authenticode-test-ca.crt"
+          Import-Certificate -FilePath ".\authenticode-test-ca.crt" -CertStoreLocation "cert:\LocalMachine\Root"
+          Remove-Item ".\authenticode-test-ca.crt" -ErrorAction SilentlyContinue | Out-Null
+
+      - name: Import build artifacts
+        shell: pwsh
+        env:
+          CONAN_LOGIN_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          CONAN_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        working-directory: package
+        run: |
+          $Version = '${{ needs.preflight.outputs.upstream-version }}'
+          .\build.ps1 import -Version $Version
+
+      - name: Code sign build artifacts
+        shell: pwsh
+        run: |
+          $Params = @('sign',
+            '-kvt', '${{ secrets.AZURE_TENANT_ID }}',
+            '-kvu', '${{ secrets.CODE_SIGNING_KEYVAULT_URL }}',
+            '-kvi', '${{ secrets.CODE_SIGNING_CLIENT_ID }}',
+            '-kvs', '${{ secrets.CODE_SIGNING_CLIENT_SECRET }}',
+            '-kvc', '${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}',
+            '-tr', '${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}',
+            '-v')
+          foreach ($Architecture in @('x64', 'arm64')) {
+            $NativeDir = "./package/runtimes/win-${Architecture}/native"
+            Get-ChildItem -Path "$NativeDir/*" -Include @("*.exe","*.dll") | ForEach-Object {
+              AzureSignTool @Params $_.FullName
+            }
+          }
+
+      - name: Build zip package
+        shell: pwsh
+        run: |
+          $Version = '${{ needs.preflight.outputs.package-version }}'
+          Get-ChildItem ".\package\runtimes\*-*" -Attributes Directory | % {
+            $DotNetRid = $_.BaseName
+            ($os, $arch) = $DotNetRid.Split('-')
+            $NativeDir = "./package/runtimes/$DotNetRid/native"
+            $ZipFile = "Devolutions.OpenSSH.Client-${Version}-${DotNetRid}.zip"
+            Compress-Archive -Path "$NativeDir/*" -DestinationPath "./package/${ZipFile}" -CompressionLevel Optimal
+          }
+
+      - name: Code sign zip package
+        shell: pwsh
+        run: |
+          $Params = @('sign',
+            '-kvt', '${{ secrets.AZURE_TENANT_ID }}',
+            '-kvu', '${{ secrets.CODE_SIGNING_KEYVAULT_URL }}',
+            '-kvi', '${{ secrets.CODE_SIGNING_CLIENT_ID }}',
+            '-kvs', '${{ secrets.CODE_SIGNING_CLIENT_SECRET }}',
+            '-kvc', '${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}',
+            '-tr', '${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}',
+            '-v')
+          Install-Module -Name Devolutions.Authenticode -Force
+          Get-ChildItem -Path "./package/*.zip" | ForEach-Object {
+            $ZipFile = $_.FullName
+            Get-ZipAuthenticodeDigest $ZipFile -Export
+            AzureSignTool @Params "${ZipFile}.sig.ps1"
+            Import-ZipAuthenticodeSignature $ZipFile -Remove
+          }
+
+      - name: Update nuget metadata
+        shell: pwsh
+        working-directory: package
+        run: |
+          $Version = '${{ needs.preflight.outputs.package-version }}'
+          $nuspecFilePath = Join-Path (Get-Location) "Devolutions.OpenSSH.Client.nuspec"
+          $xmlContent = [xml](Get-Content $nuspecFilePath)
+          $xmlContent.package.metadata.version = $Version
+          $xmlContent.Save($nuspecFilePath)
+
+      - name: Build nuget package
+        shell: pwsh
+        working-directory: package
+        run: |
+          .\build.ps1 package
+
+      - name: Code sign nuget package
+        if: ${{ fromJSON(inputs.sign-nuget) == true }}
+        shell: pwsh
+        run: |
+          $NugetPackage = (Get-Item ".\package\*.nupkg" | Select-Object -First 1) | Resolve-Path -Relative
+          $Params = @('sign', $NugetPackage,
+            '-kvt', '${{ secrets.AZURE_TENANT_ID }}',
+            '-kvu', '${{ secrets.CODE_SIGNING_KEYVAULT_URL }}',
+            '-kvi', '${{ secrets.CODE_SIGNING_CLIENT_ID }}',
+            '-kvs', '${{ secrets.CODE_SIGNING_CLIENT_SECRET }}',
+            '-kvc', '${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}',
+            '-tr', '${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}',
+            '-v')
+          & NuGetKeyVaultSignTool @Params
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssh-release
+          path: |
+            package/*.nupkg
+            package/*.zip
+
+  publish:
+    name: publish packages
+    runs-on: ubuntu-22.04
+    needs: [preflight, package]
+    environment: ${{ needs.preflight.outputs.package-env }}
+    if: ${{ fromJSON(inputs.skip-publish) == false }}
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: openssh-release
+          path: package
+
+      - name: Publish to nuget.org
+        shell: pwsh
+        run: |
+          $DryRun = [System.Boolean]::Parse('${{ needs.preflight.outputs.dry-run }}')
+          $NugetPackage = (Get-Item ./package/*.nupkg) | Resolve-Path -Relative
+          $PushArgs = @(
+            'nuget', 'push', "$NugetPackage",
+            '--api-key', '${{ secrets.NUGET_API_KEY }}',
+            '--source', 'https://api.nuget.org/v3/index.json',
+            '--skip-duplicate', '--no-symbols'
+          )
+          Write-Host "dotnet $($PushArgs -Join ' ')"
+          if ($DryRun) {
+            Write-Host "Dry Run: skipping nuget.org publishing!"
+          } else {
+            & 'dotnet' $PushArgs
+          }
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: package
+        run: |
+          $Version = '${{ needs.preflight.outputs.package-version }}'
+          $DryRun = [System.Boolean]::Parse('${{ needs.preflight.outputs.dry-run }}')
+
+          $HashPath = 'checksums'
+          $Files = Get-Item * -Exclude ('VERSION','CHANGELOG.md') | % { Get-FileHash -Algorithm SHA256 $_.FullName }
+          $Files | % { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } | Out-File -FilePath $HashPath -Append -Encoding ASCII
+
+          echo "::group::checksums"
+          Get-Content $HashPath
+          echo "::endgroup::"
+
+          $ReleaseTag = "v$Version"
+          $Repository = $Env:GITHUB_REPOSITORY
+          $ReleaseTitle = "Devolutions OpenSSH v${Version}"
+
+          if ($DryRun) {
+            Write-Host "Dry Run: skipping GitHub release!"
+          } else {
+            & gh release create $ReleaseTag --repo $Repository --title $ReleaseTitle ./*
+          }
