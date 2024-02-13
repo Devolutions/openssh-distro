@@ -1,0 +1,20 @@
+<package>
+  <metadata>
+    <id>Devolutions.OpenSSH.Client</id>
+    <version>1.0.0.0</version>
+    <authors>Marc-André Moreau</authors>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Devolutions OpenSSH Client</description>
+    <dependencies />
+  </metadata>
+  <files>
+    <file src="runtimes/win-x64/native/ssh.exe" target="runtimes/win-x64/native/ssh.exe" />
+    <file src="runtimes/win-arm64/native/ssh.exe" target="runtimes/win-arm64/native/ssh.exe" />
+    <file src="runtimes/osx-x64/native/ssh" target="runtimes/osx-x64/native/ssh" />
+    <file src="runtimes/osx-arm64/native/ssh" target="runtimes/osx-arm64/native/ssh" />
+    <file src="runtimes/linux-x64/native/ssh" target="runtimes/linux-x64/native/ssh" />
+    <file src="runtimes/linux-arm64/native/ssh" target="runtimes/linux-arm64/native/ssh" />
+    <file src="Devolutions.OpenSSH.Client.targets" target="build" />
+    <file src="Devolutions.OpenSSH.Client.Linux.targets" target="build" />
+  </files>
+</package>

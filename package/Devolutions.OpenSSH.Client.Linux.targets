@@ -1,0 +1,16 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <CompileDependsOn>
+            $(CompileDependsOn)
+            SetFilePermissionsTarget
+        </CompileDependsOn>
+    </PropertyGroup>
+    <Target Name="SetFilePermissionsTarget">
+        <Exec Command="chmod a+x &quot;$(MSBuildThisFileDirectory)../runtimes/linux-x64/native/ssh&quot;"
+              ConsoleToMsBuild="true"
+              Condition="$([MSBuild]::IsOSPlatform('Linux'))"/>
+        <Exec Command="chmod a+x &quot;$(MSBuildThisFileDirectory)../runtimes/linux-arm64/native/ssh&quot;"
+              ConsoleToMsBuild="true"
+              Condition="$([MSBuild]::IsOSPlatform('Linux'))"/>
+    </Target>
+</Project>
