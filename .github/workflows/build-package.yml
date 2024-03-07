@@ -170,7 +170,7 @@ jobs:
         shell: pwsh
         working-directory: package
         run: |
-          .\build.ps1 package
+          & 'nuget' 'pack' 'Devolutions.OpenSSH.Client.nuspec'
 
       - name: Code sign nuget package
         if: ${{ fromJSON(inputs.sign-nuget) == true }}
