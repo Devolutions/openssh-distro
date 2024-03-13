@@ -170,7 +170,10 @@ jobs:
         shell: pwsh
         working-directory: package
         run: |
+          Install-Module -Name ZipIt -Force
           & 'nuget' 'pack' 'Devolutions.OpenSSH.Client.nuspec'
+          $NugetPackage = (Get-Item ".\*.nupkg" | Select-Object -First 1) | Resolve-Path -Relative
+          Set-ZipItUnixFilePermissions $NugetPackage -FilePattern "native/ssh$" -FilePermissions "r-xr-xr-x"
 
       - name: Code sign nuget package
         if: ${{ fromJSON(inputs.sign-nuget) == true }}

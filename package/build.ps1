@@ -13,23 +13,13 @@ function Import-ConanPackage {
         'macos-arm64',
         'linux-x86_64',
         'linux-arm64'
-    ) | % {
+    ) | ForEach-Object {
         $Env:CONAN_IMPORT_PACKAGE="openssh/${Version}@devolutions/stable"
         & conan install . -pr $_ -s build_type=Release
     }
 }
 
-function Invoke-BuildPackage {
-    Param()
-
-    Set-Location $PSScriptRoot
-
-    Import-ConanPackage
-
-    & 'nuget' 'pack' 'Devolutions.OpenSSH.Client.nuspec'
-}
-
-$CmdVerbs = @('import', 'package')
+$CmdVerbs = @('import')
 
 if ($args.Count -lt 1) {
     throw "not enough arguments!"
@@ -44,5 +34,4 @@ if ($CmdVerbs -NotContains $CmdVerb) {
 
 switch ($CmdVerb) {
     "import" { Import-ConanPackage @CmdArgs }
-    "package" { Invoke-BuildPackage @CmdArgs }
 }
