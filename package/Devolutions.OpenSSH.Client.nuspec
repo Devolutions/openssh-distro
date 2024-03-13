@@ -15,6 +15,5 @@
     <file src="runtimes/linux-x64/native/ssh" target="runtimes/linux-x64/native/ssh" />
     <file src="runtimes/linux-arm64/native/ssh" target="runtimes/linux-arm64/native/ssh" />
     <file src="Devolutions.OpenSSH.Client.targets" target="build" />
-    <file src="Devolutions.OpenSSH.Client.Linux.targets" target="build" />
   </files>
 </package>
