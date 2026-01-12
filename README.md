@@ -19,7 +19,7 @@ Microsoft Win32-OpenSSH downstream fork containing all Windows-specific patches 
 Use the `Win32OpenSSHPatch.ps1` script from Linux to generate Microsoft patches which can be applied on top of the upstream repository:
 
 ```bash
-./scripts/Win32OpenSSHPatch.ps1 9.5.0
+./scripts/Win32OpenSSHPatch.ps1 9.8.0
 ```
 
 ## LibreSSL Patches
@@ -33,7 +33,7 @@ Microsoft repository for the Win32-OpenSSH LibreSSL downstream fork with patches
 Use the `Win32LibreSSLPatch.ps1` script from Linux to generate Microsoft patches which can be applied on top of the upstream repository:
 
 ```bash
-./scripts/Win32LibreSSLPatch.ps1 3.8.2
+./scripts/Win32LibreSSLPatch.ps1 4.0.0
 ```
 
 ## libfido2 Patches
@@ -47,7 +47,7 @@ Microsoft repository for the Win32-OpenSSH libfido2 downstream fork with patches
 Use the `Win32LibFIDO2Patch.ps1` script from Linux to generate Microsoft patches which can be applied on top of the upstream repository:
 
 ```bash
-./scripts/Win32LibFIDO2Patch.ps1 1.14.0
+./scripts/Win32LibFIDO2Patch.ps1 1.15.0
 ```
 
 In the case of libfido2, the changes from Microsoft are fairly minimal.

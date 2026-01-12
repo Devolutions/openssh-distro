@@ -6,7 +6,7 @@ on:
         description: Upstream build version
         required: true
         type: string
-        default: '9.5.0'
+        default: '9.8.0'
       revision:
         description: build revision number
         default: '0'
@@ -206,6 +206,7 @@ jobs:
     if: ${{ fromJSON(inputs.skip-publish) == false }}
     permissions:
       id-token: write
+      contents: write
 
     steps:
       - name: Download packages
@@ -215,6 +216,7 @@ jobs:
           path: package
 
       - name: NuGet login (OIDC)
+        if: ${{ needs.preflight.outputs.dry-run == 'false' }}
         id: nuget-login
         uses: NuGet/login@v1
         with:
