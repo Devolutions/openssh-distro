@@ -1,21 +1,21 @@
-From 6cab9cef55f6272cb690b319824ab32f48662c93 Mon Sep 17 00:00:00 2001
+From f709b890b752956586bbeb6c37b0dbe3c4b5ad2c Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
-Date: Tue, 13 Jan 2026 11:42:16 -0500
+Date: Tue, 13 Jan 2026 16:06:07 -0500
 Subject: [PATCH] add cmake build system
 
 ---
- CMakeLists.txt    | 1763 +++++++++++++++++++++++++++++++++++++
+ CMakeLists.txt    | 1791 ++++++++++++++++++++++++++++++++++++++
  cmake-config.h.in | 2104 +++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 3867 insertions(+)
+ 2 files changed, 3895 insertions(+)
  create mode 100644 CMakeLists.txt
  create mode 100644 cmake-config.h.in
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 new file mode 100644
-index 0000000..a5c5d94
+index 0000000..8ad8a67
 --- /dev/null
 +++ b/CMakeLists.txt
-@@ -0,0 +1,1763 @@
+@@ -0,0 +1,1791 @@
 +
 +cmake_minimum_required(VERSION 3.18)
 +
@@ -1255,64 +1255,91 @@ index 0000000..a5c5d94
 +
 +# sshd
 +
-+set(OPENSSH_SSHD_SOURCES
++# sshd-session (session handler)
++
++set(OPENSSH_SSHD_SESSION_SOURCES
++    "${OPENSSH_SRC_DIR}/sshd-session.c"
++    "${OPENSSH_SRC_DIR}/auth-rhosts.c"
++    "${OPENSSH_SRC_DIR}/auth-passwd.c"
++    "${OPENSSH_SRC_DIR}/audit.c"
 +    "${OPENSSH_SRC_DIR}/audit-bsm.c"
 +    "${OPENSSH_SRC_DIR}/audit-linux.c"
-+    "${OPENSSH_SRC_DIR}/audit.c"
-+    "${OPENSSH_SRC_DIR}/auth-bsdauth.c"
-+    "${OPENSSH_SRC_DIR}/auth-krb5.c"
-+    "${OPENSSH_SRC_DIR}/auth-options.c"
-+    "${OPENSSH_SRC_DIR}/auth-pam.c"
-+    "${OPENSSH_SRC_DIR}/auth-passwd.c"
-+    "${OPENSSH_SRC_DIR}/auth-rhosts.c"
-+    "${OPENSSH_SRC_DIR}/auth-shadow.c"
-+    "${OPENSSH_SRC_DIR}/auth-sia.c"
++    "${OPENSSH_SRC_DIR}/platform.c"
++    "${OPENSSH_SRC_DIR}/sshpty.c"
++    "${OPENSSH_SRC_DIR}/sshlogin.c"
++    "${OPENSSH_SRC_DIR}/servconf.c"
++    "${OPENSSH_SRC_DIR}/serverloop.c"
 +    "${OPENSSH_SRC_DIR}/auth.c"
++    "${OPENSSH_SRC_DIR}/auth2.c"
++    "${OPENSSH_SRC_DIR}/auth2-methods.c"
++    "${OPENSSH_SRC_DIR}/auth-options.c"
++    "${OPENSSH_SRC_DIR}/session.c"
 +    "${OPENSSH_SRC_DIR}/auth2-chall.c"
-+    "${OPENSSH_SRC_DIR}/auth2-gss.c"
++    "${OPENSSH_SRC_DIR}/groupaccess.c"
++    "${OPENSSH_SRC_DIR}/auth-bsdauth.c"
 +    "${OPENSSH_SRC_DIR}/auth2-hostbased.c"
 +    "${OPENSSH_SRC_DIR}/auth2-kbdint.c"
 +    "${OPENSSH_SRC_DIR}/auth2-none.c"
 +    "${OPENSSH_SRC_DIR}/auth2-passwd.c"
 +    "${OPENSSH_SRC_DIR}/auth2-pubkey.c"
 +    "${OPENSSH_SRC_DIR}/auth2-pubkeyfile.c"
-+    "${OPENSSH_SRC_DIR}/auth2.c"
-+    "${OPENSSH_SRC_DIR}/gss-serv-krb5.c"
-+    "${OPENSSH_SRC_DIR}/gss-serv.c"
-+    "${OPENSSH_SRC_DIR}/loginrec.c"
 +    "${OPENSSH_SRC_DIR}/monitor.c"
 +    "${OPENSSH_SRC_DIR}/monitor_wrap.c"
-+    "${OPENSSH_SRC_DIR}/platform.c"
-+    "${OPENSSH_SRC_DIR}/sandbox-capsicum.c"
-+    "${OPENSSH_SRC_DIR}/sandbox-darwin.c"
++    "${OPENSSH_SRC_DIR}/auth-krb5.c"
++    "${OPENSSH_SRC_DIR}/auth2-gss.c"
++    "${OPENSSH_SRC_DIR}/gss-serv.c"
++    "${OPENSSH_SRC_DIR}/gss-serv-krb5.c"
++    "${OPENSSH_SRC_DIR}/loginrec.c"
++    "${OPENSSH_SRC_DIR}/auth-pam.c"
++    "${OPENSSH_SRC_DIR}/auth-shadow.c"
++    "${OPENSSH_SRC_DIR}/auth-sia.c"
++    "${OPENSSH_SRC_DIR}/sftp-server.c"
++    "${OPENSSH_SRC_DIR}/sftp-common.c"
 +    "${OPENSSH_SRC_DIR}/sandbox-null.c"
 +    "${OPENSSH_SRC_DIR}/sandbox-rlimit.c"
-+    "${OPENSSH_SRC_DIR}/sandbox-seccomp-filter.c"
 +    "${OPENSSH_SRC_DIR}/sandbox-systrace.c"
-+    "${OPENSSH_SRC_DIR}/servconf.c"
-+    "${OPENSSH_SRC_DIR}/serverloop.c"
-+    "${OPENSSH_SRC_DIR}/session.c"
-+    "${OPENSSH_SRC_DIR}/sftp-common.c"
-+    "${OPENSSH_SRC_DIR}/sshd.c"
-+    "${OPENSSH_SRC_DIR}/sshlogin.c"
-+    "${OPENSSH_SRC_DIR}/srclimit.c"
++    "${OPENSSH_SRC_DIR}/sandbox-darwin.c"
++    "${OPENSSH_SRC_DIR}/sandbox-seccomp-filter.c"
++    "${OPENSSH_SRC_DIR}/sandbox-capsicum.c"
 +    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
 +
-+if(WIN32)
-+    list(APPEND OPENSSH_SSHD_SOURCES
-+        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_groupaccess.c"
-+        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32_sshpty.c"
-+        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/wmain_sshd.c"
-+        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/w32-doexec.c"
-+        "${OPENSSH_SRC_DIR}/contrib/win32/win32compat/win32-utf8.c")
-+else()
-+    list(APPEND OPENSSH_SSHD_SOURCES
++if(NOT WIN32)
++    list(APPEND OPENSSH_SSHD_SESSION_SOURCES
 +        "${OPENSSH_SRC_DIR}/sftp-realpath.c"
-+        "${OPENSSH_SRC_DIR}/sftp-server.c"
-+        "${OPENSSH_SRC_DIR}/groupaccess.c"
-+        "${OPENSSH_SRC_DIR}/sshpty.c"
 +        "${OPENSSH_SRC_DIR}/utf8.c")
 +endif()
++
++set(OPENSSH_SSHD_SESSION_RESOURCES
++    "${OPENSSH_TARGETOS_MANIFEST}"
++    "${OPENSSH_VERSION_RC}")
++
++add_executable(sshd-session
++    ${OPENSSH_SSHD_SESSION_SOURCES}
++    ${OPENSSH_SSHD_SESSION_RESOURCES})
++
++if(WIN32)
++    set_target_properties(sshd-session PROPERTIES LINK_FLAGS "${C_FLAGS_ENTRY_POINT} /ignore:4099")
++endif()
++
++target_link_libraries(sshd-session ${OPENSSH_COMMON_LIBRARIES})
++
++# sshd (listener/manager)
++
++set(OPENSSH_SSHD_SOURCES
++    "${OPENSSH_SRC_DIR}/sshd.c"
++    "${OPENSSH_SRC_DIR}/platform-listen.c"
++    "${OPENSSH_SRC_DIR}/servconf.c"
++    "${OPENSSH_SRC_DIR}/sshpty.c"
++    "${OPENSSH_SRC_DIR}/srclimit.c"
++    "${OPENSSH_SRC_DIR}/groupaccess.c"
++    "${OPENSSH_SRC_DIR}/auth2-methods.c"
++    "${OPENSSH_SRC_DIR}/dns.c"
++    "${OPENSSH_SRC_DIR}/fatal.c"
++    "${OPENSSH_SRC_DIR}/compat.c"
++    "${OPENSSH_SRC_DIR}/utf8.c"
++    "${OPENSSH_SRC_DIR}/authfd.c"
++    "${OPENSSH_SRC_DIR}/canohost.c"
++    "${OPENSSH_SRC_DIR}/ssh-sk-client.c")
 +
 +set(OPENSSH_SSHD_RESOURCES
 +    "${OPENSSH_TARGETOS_MANIFEST}"
@@ -1761,6 +1788,7 @@ index 0000000..a5c5d94
 +set(OPENSSH_INSTALL_TARGETS
 +    "ssh"
 +    "sshd"
++    "sshd-session"
 +    "scp"
 +    "sftp"
 +    "sftp-server"
