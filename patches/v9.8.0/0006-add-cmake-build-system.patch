@@ -1,21 +1,21 @@
-From 5a0422e1dd978817698944b1744d1bee0c8f9d7b Mon Sep 17 00:00:00 2001
+From 6cab9cef55f6272cb690b319824ab32f48662c93 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Marc-Andr=C3=A9=20Moreau?= <mamoreau@devolutions.net>
-Date: Thu, 1 Feb 2024 13:44:42 -0500
-Subject: [PATCH 7/7] add cmake build system
+Date: Tue, 13 Jan 2026 11:42:16 -0500
+Subject: [PATCH] add cmake build system
 
 ---
- CMakeLists.txt    | 1762 +++++++++++++++++++++++++++++++++++++
+ CMakeLists.txt    | 1763 +++++++++++++++++++++++++++++++++++++
  cmake-config.h.in | 2104 +++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 3866 insertions(+)
+ 2 files changed, 3867 insertions(+)
  create mode 100644 CMakeLists.txt
  create mode 100644 cmake-config.h.in
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 new file mode 100644
-index 000000000..72d8edc99
+index 0000000..a5c5d94
 --- /dev/null
 +++ b/CMakeLists.txt
-@@ -0,0 +1,1762 @@
+@@ -0,0 +1,1763 @@
 +
 +cmake_minimum_required(VERSION 3.18)
 +
@@ -1781,7 +1781,7 @@ index 000000000..72d8edc99
 +    RUNTIME DESTINATION bin)
 diff --git a/cmake-config.h.in b/cmake-config.h.in
 new file mode 100644
-index 000000000..7098268b1
+index 0000000..7098268
 --- /dev/null
 +++ b/cmake-config.h.in
 @@ -0,0 +1,2104 @@
@@ -3890,5 +3890,5 @@ index 000000000..7098268b1
 +/* type to use in place of socklen_t if not defined */
 +#cmakedefine socklen_t
 -- 
-2.25.1
+2.34.1
 
