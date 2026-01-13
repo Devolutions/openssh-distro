@@ -8790,7 +8790,7 @@ index fe6ae7f..bca496e 100644
  	_exit(EXIT_LOGIN_GRACE);
  }
  
-@@ -330,7 +691,81 @@ privsep_preauth(struct ssh *ssh)
+@@ -330,7 +691,80 @@ privsep_preauth(struct ssh *ssh)
  	/* Store a pointer to the kex for later rekeying */
  	pmonitor->m_pkex = &ssh->kex;
  
@@ -8868,8 +8868,7 @@ index fe6ae7f..bca496e 100644
 +		return 1;
 +	}
 +#else
-+	if (use_privsep == PRIVSEP_ON)
-+		box = ssh_sandbox_init(pmonitor);
++	box = ssh_sandbox_init(pmonitor);
  	pid = fork();
  	if (pid == -1) {
  		fatal("fork of unprivileged child failed");
@@ -9084,14 +9083,16 @@ index fe6ae7f..bca496e 100644
  		cleanup_exit(255);
  	}
  
-@@ -1257,6 +1812,11 @@ main(int ac, char **av)
+@@ -1257,6 +1812,13 @@ main(int ac, char **av)
  
  	rdomain = ssh_packet_rdomain_in(ssh);
  
++#ifdef WINDOWS
 +	if (privsep_unauth_child || privsep_auth_child) {
 +		recv_idexch_state(ssh, PRIVSEP_MONITOR_FD);
 +		goto idexch_done;
 +	}
++#endif /* WINDOWS */
 +
  	/* Log the connection. */
  	laddr = get_local_ipaddr(sock_in);
