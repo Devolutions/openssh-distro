@@ -1012,6 +1012,7 @@ index 000000000..72d8edc99
 +    "${OPENSSH_SRC_DIR}/hmac.c"
 +    "${OPENSSH_SRC_DIR}/hostfile.c"
 +    "${OPENSSH_SRC_DIR}/kex.c"
++    "${OPENSSH_SRC_DIR}/kex-names.c"
 +    "${OPENSSH_SRC_DIR}/kexc25519.c")
 +
 +if(USE_OPENSSL)
