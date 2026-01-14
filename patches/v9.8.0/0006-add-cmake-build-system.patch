@@ -954,6 +954,13 @@ index 0000000..8ad8a67
 +    "${OPENSSH_SRC_DIR}/openbsd-compat/strcasestr.c"
 +    "${OPENSSH_SRC_DIR}/openbsd-compat/strndup.c")
 +
++if(WIN32)
++    # On Windows, explicit_bzero is provided by win32compat/misc.c
++    # Remove it from openbsd-compat to avoid duplicate symbols with libfido2
++    list(REMOVE_ITEM OPENSSH_OPENBSD_COMPAT_SOURCES
++        "${OPENSSH_SRC_DIR}/openbsd-compat/explicit_bzero.c")
++endif()
++
 +if(NOT WIN32)
 +    list(APPEND OPENSSH_OPENBSD_COMPAT_SOURCES
 +        "${OPENSSH_SRC_DIR}/openbsd-compat/getrrsetbyname.c"
