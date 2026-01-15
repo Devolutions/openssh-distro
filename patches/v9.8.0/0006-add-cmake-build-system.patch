@@ -4,9 +4,9 @@ Date: Tue, 13 Jan 2026 16:06:07 -0500
 Subject: [PATCH] add cmake build system
 
 ---
- CMakeLists.txt    | 1798 ++++++++++++++++++++++++++++++++++++++
+ CMakeLists.txt    | 1799 ++++++++++++++++++++++++++++++++++++++
  cmake-config.h.in | 2104 +++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 3902 insertions(+)
+ 2 files changed, 3903 insertions(+)
  create mode 100644 CMakeLists.txt
  create mode 100644 cmake-config.h.in
 
@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..8ad8a67
 --- /dev/null
 +++ b/CMakeLists.txt
-@@ -0,0 +1,1798 @@
+@@ -0,0 +1,1799 @@
 +
 +cmake_minimum_required(VERSION 3.18)
 +
@@ -29,6 +29,7 @@ index 0000000..8ad8a67
 +    file(TO_CMAKE_PATH "${KITS_ROOT_10}" WindowsSdkDir)
 +    string(APPEND WindowsSdkDir "/")
 +    set(VC_INCLUDE_PATH "${WindowsSdkDir}include/${WINSDK_VERSION}/ucrt")
++    add_compile_definitions(LIBFIDO2_DISABLE_EXPLICIT_BZERO)
 +endif()
 +
 +project(OpenSSH C)
