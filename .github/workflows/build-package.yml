@@ -76,7 +76,7 @@ jobs:
 
     steps:
       - name: Clone project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup conan
         run: |
@@ -191,7 +191,7 @@ jobs:
           & NuGetKeyVaultSignTool @Params
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openssh-release
           path: |
@@ -209,7 +209,7 @@ jobs:
 
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: openssh-release
           path: package
