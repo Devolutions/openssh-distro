@@ -1,5 +1,9 @@
 # Devolutions OpenSSH
 
+> ⚠️ **Deprecated and Unmaintained**
+>
+> This project is no longer maintained. The repository is kept online for historical reference, but it will not receive updates, bug fixes, or security patches. Use it at your own risk.
+
 ## Distribution Repositories
 
 [Devolutions/openssh-distro](https://github.com/Devolutions/openssh-distro):
